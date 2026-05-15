@@ -93,6 +93,7 @@ from .registry import (
     model_complexity_rank,
     normalization_policy,
     registered_models,
+    resolve_autoencoder_hyperparams,
     resolve_cnn_hyperparams,
     supported_representation_kinds,
 )
@@ -3144,6 +3145,7 @@ def _prepare_supervised_run(
     task_mode: str,
     multiclass_attack_names: list[str] | None,
     cnn_hyperparams: Path | None,
+    autoencoder_hyperparams: Path | None,
     dann_source_rank: int,
     dann_target_adaptation_percent: int,
     dann_lambda_max: float,
@@ -3169,6 +3171,8 @@ def _prepare_supervised_run(
         )
     if cnn_hyperparams is not None and model_name not in {CNN_1D_MODEL_NAME, CNN_1D_DANN_MODEL_NAME, "all"}:
         raise ValueError("--cnn-hyperparams is only supported when --model is cnn_1d, cnn_1d_dann, or all")
+    if autoencoder_hyperparams is not None and model_name not in {"autoencoder_knn", "all"}:
+        raise ValueError("--autoencoder-hyperparams is only supported when --model is autoencoder_knn or all")
     if bool(class_weight_loss) and bool(rank_label_weight_loss):
         raise ValueError("--class-weight-loss and --rank-label-weight-loss are mutually exclusive")
     task_spec = _resolve_supervised_task_spec(
@@ -3330,11 +3334,22 @@ def _prepare_supervised_run(
         )
     resolved_cnn_hyperparam_axes: dict[str, list[Any]] | None = None
     cnn_hyperparams_info: dict[str, Any] | None = None
+    resolved_autoencoder_hyperparam_axes: dict[str, list[Any]] | None = None
+    autoencoder_hyperparams_info: dict[str, Any] | None = None
     if cnn_model_selected:
         resolved_cnn_hyperparam_axes, cnn_hyperparams_info = resolve_cnn_hyperparams(cnn_hyperparams)
     elif cnn_hyperparams is not None:
         extractor_warnings.append(
             "Ignored --cnn-hyperparams because no CNN model is selected for this supervised run"
+        )
+    autoencoder_model_selected = any(name == "autoencoder_knn" for name in model_names)
+    if autoencoder_model_selected:
+        resolved_autoencoder_hyperparam_axes, autoencoder_hyperparams_info = resolve_autoencoder_hyperparams(
+            autoencoder_hyperparams
+        )
+    elif autoencoder_hyperparams is not None:
+        extractor_warnings.append(
+            "Ignored --autoencoder-hyperparams because no autoencoder_knn model is selected for this supervised run"
         )
 
     labels_values, labels_known, labels_raw = _labels_from_items(
@@ -3489,6 +3504,9 @@ def _prepare_supervised_run(
                 resolved_cnn_hyperparam_axes
                 if selected_model in {CNN_1D_MODEL_NAME, CNN_1D_DANN_MODEL_NAME}
                 else None
+            ),
+            autoencoder_hyperparams=(
+                resolved_autoencoder_hyperparam_axes if selected_model == "autoencoder_knn" else None
             ),
         )
         for params in model_candidate_params:
@@ -3692,6 +3710,7 @@ def _prepare_supervised_run(
             "estimated_total_fits": int(estimated_total_fits),
             "cv_stratification": cv_stratification_summary,
             "cnn_hyperparams": cnn_hyperparams_info,
+            "autoencoder_hyperparams": autoencoder_hyperparams_info,
             "cv_splits": cv_splits,
             "cv_split_groups": cv_split_groups,
             "tasks": tasks,
@@ -4161,8 +4180,20 @@ def _prepare_supervised_finalize(
         percentiles=[float(x) for x in score_percentiles],
     )
 
-    model_path = ctx.models_dir / ("best_model.pt" if winner_backend == "cnn" else "best_model.joblib")
+    model_path = ctx.models_dir / (
+        "best_model.pt" 
+        if winner_backend in ("cnn", "autoencoder_knn") 
+        else "best_model.joblib"
+    )
     _save_model(model, model_path)
+
+    # Save fit summary if available (for cnn and autoencoder_knn backends)
+    if winner_backend in ("cnn", "autoencoder_knn") and hasattr(model, "fit_summary"):
+        fit_summary = model.fit_summary
+        if fit_summary:
+            fit_summary_path = ctx.models_dir / "fit_summary.json"
+            with open(fit_summary_path, "w", encoding="utf-8") as f:
+                json.dump(fit_summary, f, indent=2, default=str)
 
     train_model_names = [model_names[int(i)] for i in train_indices.tolist()]
     train_sample_identities = [all_sample_identities[int(i)] for i in train_indices.tolist()]
@@ -4286,6 +4317,12 @@ def _prepare_supervised_finalize(
                 open_set_result=infer_open_set_result,
             ),
         )
+
+        # Extract and save evaluation set features (for cnn and autoencoder_knn backends)
+        if winner_backend in ("cnn", "autoencoder_knn") and isinstance(x_infer, SupervisedFeatureBundle):
+            infer_features = model.extract_features(x_infer)
+            infer_features_path = ctx.reports_dir / "inference_features.npy"
+            np.save(infer_features_path, infer_features)
 
         threshold_rows = compute_infer_threshold_rows(
             train_scores=train_scores,
@@ -4867,6 +4904,7 @@ def run_supervised_pipeline(
     task_mode: str = SUPERVISED_TASK_MODE_BINARY,
     multiclass_attack_names: list[str] | None = None,
     cnn_hyperparams: Path | None = None,
+    autoencoder_hyperparams: Path | None = None,
     dann_source_rank: int = DANN_DEFAULT_SOURCE_RANK,
     dann_target_adaptation_percent: int = DANN_DEFAULT_TARGET_ADAPTATION_PERCENT,
     dann_lambda_max: float = DANN_DEFAULT_LAMBDA_MAX,
@@ -4929,6 +4967,7 @@ def run_supervised_pipeline(
             task_mode=task_mode,
             multiclass_attack_names=multiclass_attack_names,
             cnn_hyperparams=cnn_hyperparams,
+            autoencoder_hyperparams=autoencoder_hyperparams,
             dann_source_rank=int(dann_source_rank),
             dann_target_adaptation_percent=int(dann_target_adaptation_percent),
             dann_lambda_max=float(dann_lambda_max),
@@ -5006,6 +5045,7 @@ def run_supervised_pipeline(
         task_mode=task_mode,
         multiclass_attack_names=multiclass_attack_names,
         cnn_hyperparams=cnn_hyperparams,
+        autoencoder_hyperparams=autoencoder_hyperparams,
         dann_source_rank=int(dann_source_rank),
         dann_target_adaptation_percent=int(dann_target_adaptation_percent),
         dann_lambda_max=float(dann_lambda_max),

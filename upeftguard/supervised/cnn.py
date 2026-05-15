@@ -1379,6 +1379,13 @@ class CNN1DSupervisedModel:
         )
         return self._logits_from_loader(loader)
 
+    @property
+    def fit_summary(self) -> dict[str, Any]:
+        """Get the fit summary containing training details and history."""
+        if not hasattr(self, "_fit_summary") or not self._fit_summary:
+            return {}
+        return dict(self._fit_summary)
+
     def extract_features(self, bundle: SupervisedFeatureBundle) -> np.ndarray:
         _require_torch()
         assert torch is not None

@@ -39,6 +39,7 @@ CNN_1D_HYPERPARAM_NAMES = (
 )
 CNN_1D_MODEL_NAME = "cnn_1d"
 CNN_1D_DANN_MODEL_NAME = "cnn_1d_dann"
+AUTOENCODER_KNN_MODEL_NAME = "autoencoder_knn"
 _CNN_1D_INTEGER_HYPERPARAMS = {"conv_channels", "num_conv_layers", "kernel_size"}
 _CNN_1D_FLOAT_HYPERPARAMS = {"dropout", "learning_rate", "weight_decay"}
 
@@ -74,6 +75,10 @@ def _standard_scaler() -> StandardScaler:
 
 def default_cnn_hyperparams_path() -> Path:
     return Path(__file__).resolve().parents[2] / "manifests" / "cnn_hyperparams" / "cnn_1d_default.json"
+
+
+def default_autoencoder_hyperparams_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "manifests" / "selfsupervised_hyperparams" / "autoencoder_hyperparams.json"
 
 
 def _load_json_object(path: Path) -> dict[str, Any]:
@@ -154,6 +159,79 @@ def resolve_cnn_hyperparams(
     return axes, metadata
 
 
+def _normalize_autoencoder_hyperparam_axes(payload: dict[str, Any]) -> dict[str, list[Any]]:
+    raw_keys = {str(key) for key in payload.keys()}
+    expected_keys = {
+        "conv_channels",
+        "num_conv_layers",
+        "kernel_size",
+        "n_neighbors",
+        "dropout",
+        "learning_rate",
+        "weight_decay",
+    }
+    missing = sorted(expected_keys - raw_keys)
+    extra = sorted(raw_keys - expected_keys)
+    if missing or extra:
+        details: list[str] = []
+        if missing:
+            details.append(f"missing={missing}")
+        if extra:
+            details.append(f"extra={extra}")
+        raise ValueError(
+            "autoencoder hyperparameter JSON must define exactly these keys: "
+            f"{sorted(expected_keys)} ({'; '.join(details)})"
+        )
+
+    normalized: dict[str, list[Any]] = {}
+    for name in sorted(expected_keys):
+        raw_values = payload.get(name)
+        if not isinstance(raw_values, list) or not raw_values:
+            raise ValueError(
+                f"autoencoder hyperparameter '{name}' must be a non-empty JSON list, got {type(raw_values).__name__}"
+            )
+        if name in {"conv_channels", "num_conv_layers", "kernel_size", "n_neighbors"}:
+            normalized[name] = [int(value) for value in raw_values]
+        elif name in {"dropout", "learning_rate", "weight_decay"}:
+            normalized[name] = [float(value) for value in raw_values]
+        else:
+            raise ValueError(f"Unsupported autoencoder hyperparameter axis {name!r}")
+    return normalized
+
+
+def resolve_autoencoder_hyperparams(
+    autoencoder_hyperparams: Path | str | dict[str, Any] | None = None,
+) -> tuple[dict[str, list[Any]], dict[str, Any]]:
+    if autoencoder_hyperparams is None:
+        source_path = default_autoencoder_hyperparams_path()
+        payload = _load_json_object(source_path)
+        source = {
+            "source": "default_file",
+            "path": str(source_path),
+        }
+    elif isinstance(autoencoder_hyperparams, dict):
+        payload = dict(autoencoder_hyperparams)
+        source = {
+            "source": "inline_object",
+            "path": None,
+        }
+    else:
+        source_path = Path(autoencoder_hyperparams).expanduser().resolve()
+        payload = _load_json_object(source_path)
+        source = {
+            "source": "file",
+            "path": str(source_path),
+        }
+
+    axes = _normalize_autoencoder_hyperparam_axes(payload)
+    metadata = {
+        **source,
+        "axes": {name: list(values) for name, values in axes.items()},
+        "n_candidates": int(len(_grid(**axes))),
+    }
+    return axes, metadata
+
+
 def _build_pipeline(
     definition: ModelDefinition,
     params: dict[str, Any],
@@ -224,6 +302,35 @@ def _create_cnn_1d_dann(
         dann_lambda_gamma=float(params.get("dann_lambda_gamma", 10.0)),
         dann_lr_alpha=float(params.get("dann_lr_alpha", 10.0)),
         dann_lr_beta=float(params.get("dann_lr_beta", 0.75)),
+        class_weight_loss=bool(params.get("class_weight_loss", False)),
+        rank_label_weight_loss=bool(params.get("rank_label_weight_loss", False)),
+    )
+
+
+def _create_autoencoder_knn(
+    params: dict[str, Any],
+    random_state: int,
+    task_spec: SupervisedTaskSpec | None,
+) -> Any:
+    from .autoencoder import AutoencoderKNNSupervisedModel
+
+    return AutoencoderKNNSupervisedModel(
+        conv_channels=int(params.get("conv_channels", 64)),
+        num_conv_layers=int(params.get("num_conv_layers", 3)),
+        kernel_size=int(params.get("kernel_size", 3)),
+        stride=1,
+        dilation=1,
+        n_neighbors=int(params.get("n_neighbors", 5)),
+        dropout=float(params.get("dropout", 0.1)),
+        use_residual=True,
+        normalization="layernorm",
+        pooling="mean_max",
+        include_total_layer_count=True,
+        depth_feature_mode="both",
+        learning_rate=float(params.get("learning_rate", 0.001)),
+        weight_decay=float(params.get("weight_decay", 0.0)),
+        random_state=int(random_state),
+        task_spec=task_spec,
         class_weight_loss=bool(params.get("class_weight_loss", False)),
         rank_label_weight_loss=bool(params.get("rank_label_weight_loss", False)),
     )
@@ -371,6 +478,16 @@ _REGISTRY: dict[str, ModelDefinition] = {
         estimator_factory=_create_cnn_1d_dann,
         supported_representation_kinds=(ARCHITECTURE_INDEPENDENT_LAYER_SEQUENCE_KIND,),
     ),
+    AUTOENCODER_KNN_MODEL_NAME: ModelDefinition(
+        name=AUTOENCODER_KNN_MODEL_NAME,
+        backend="autoencoder_knn",
+        complexity_rank=8,
+        normalization_policy="masked_train_only",
+        normalization_factory=_passthrough,
+        param_grid=(),
+        estimator_factory=_create_autoencoder_knn,
+        supported_representation_kinds=(ARCHITECTURE_INDEPENDENT_LAYER_SEQUENCE_KIND,),
+    ),
 }
 
 
@@ -391,11 +508,15 @@ def create(
 def candidate_params(
     name: str,
     cnn_hyperparams: Path | str | dict[str, Any] | None = None,
+    autoencoder_hyperparams: Path | str | dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if name not in _REGISTRY:
         raise ValueError(f"Unknown supervised model '{name}'. Registered: {sorted(_REGISTRY.keys())}")
     if name in {CNN_1D_MODEL_NAME, CNN_1D_DANN_MODEL_NAME}:
         axes, _metadata = resolve_cnn_hyperparams(cnn_hyperparams)
+        return [dict(params) for params in _grid(**axes)]
+    if name == AUTOENCODER_KNN_MODEL_NAME:
+        axes, _metadata = resolve_autoencoder_hyperparams(autoencoder_hyperparams)
         return [dict(params) for params in _grid(**axes)]
     return [dict(params) for params in _REGISTRY[name].param_grid]
 

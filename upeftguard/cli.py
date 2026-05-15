@@ -28,7 +28,11 @@ from .supervised.pipeline import (
     SUPPORTED_SELECTION_METRICS,
     run_supervised_pipeline,
 )
-from .supervised.registry import default_cnn_hyperparams_path, registered_models
+from .supervised.registry import (
+    default_autoencoder_hyperparams_path,
+    default_cnn_hyperparams_path,
+    registered_models,
+)
 from .unsupervised.analysis import (
     run_supervised_cnn_feature_tsne_pipeline,
     run_unsupervised_layer_scatter_pipeline,
@@ -389,6 +393,7 @@ def _cmd_run_supervised(args: argparse.Namespace) -> int:
             list(args.multiclass_attack_names) if args.multiclass_attack_names is not None else None
         ),
         cnn_hyperparams=args.cnn_hyperparams,
+        autoencoder_hyperparams=args.autoencoder_hyperparams,
         dann_source_rank=args.dann_source_rank,
         dann_target_adaptation_percent=args.dann_target_adaptation_percent,
         dann_lambda_max=args.dann_lambda_max,
@@ -961,6 +966,17 @@ def build_parser() -> argparse.ArgumentParser:
             "to a list. If every list has one item, cnn_1d runs with a fixed configuration; otherwise "
             "the Cartesian grid is evaluated. Defaults to "
             f"{default_cnn_hyperparams_path()}."
+        ),
+    )
+    supervised.add_argument(
+        "--autoencoder-hyperparams",
+        type=Path,
+        default=None,
+        help=(
+            "Optional JSON file describing the autoencoder_knn hyperparameter search space. Each key must map "
+            "to a list. If every list has one item, autoencoder_knn runs with a fixed configuration; otherwise "
+            "the Cartesian grid is evaluated. Defaults to "
+            f"{default_autoencoder_hyperparams_path()}."
         ),
     )
     supervised.add_argument(
