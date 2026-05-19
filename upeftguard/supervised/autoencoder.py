@@ -234,6 +234,8 @@ class AutoencoderKNNSupervisedModel:
         weight_decay: float = 0.0,
         random_state: int = 42,
         device: str | None = None,
+        pretrained_checkpoint: Path | str | None = None,
+        no_train: bool = False,
         task_spec: SupervisedTaskSpec | None = None,
         max_epochs: int = CNN_MAX_EPOCHS,
         batch_size: int = CNN_BATCH_SIZE,
@@ -263,6 +265,8 @@ class AutoencoderKNNSupervisedModel:
             raise ValueError(
                 "autoencoder_knn supports either class_weight_loss or rank_label_weight_loss, not both"
             )
+        if bool(no_train) and pretrained_checkpoint is None:
+            raise ValueError("autoencoder_knn no_train requires pretrained_checkpoint")
 
         self.layer_vector_config = CNNLayerVectorConfig(
             conv_channels=int(conv_channels),
@@ -294,6 +298,12 @@ class AutoencoderKNNSupervisedModel:
         self.random_state = int(random_state)
         self.device_ = _resolve_torch_device(device)
         self.device_name_ = str(self.device_)
+        self.pretrained_checkpoint = (
+            None
+            if pretrained_checkpoint is None
+            else str(Path(pretrained_checkpoint).expanduser().resolve())
+        )
+        self.no_train = bool(no_train)
         self.task_spec = task_spec if task_spec is not None else _default_binary_task_spec()
         self.max_epochs = int(max_epochs)
         self.batch_size = int(batch_size)
@@ -313,6 +323,8 @@ class AutoencoderKNNSupervisedModel:
         self.class_names_ = tuple(str(x) for x in self.task_spec.class_names)
         self.backend_name_ = "autoencoder_knn"
         self._fit_summary: dict[str, Any] = {}
+        self._pretrained_checkpoint_payload: dict[str, Any] | None = None
+        self._pretrained_autoencoder_state_dict: dict[str, Any] | None = None
         
         # Store encoder training history
         self._encoder_history: list[dict[str, float]] = []
@@ -390,6 +402,51 @@ class AutoencoderKNNSupervisedModel:
         self.input_channels_ = int(input_channels)
         return autoencoder
 
+    def _load_pretrained_checkpoint_metadata(self) -> None:
+        if self.pretrained_checkpoint is None:
+            return
+
+        assert torch is not None
+        from .cnn import _channel_layout_from_payload, _torch_load_checkpoint
+
+        payload = _torch_load_checkpoint(Path(self.pretrained_checkpoint))
+        backend = str(payload.get("backend") or "autoencoder_knn")
+        if backend != "autoencoder_knn":
+            raise ValueError(f"Unsupported autoencoder_knn checkpoint backend={backend!r}")
+
+        channel_layout_payload = payload.get("channel_layout")
+        normalization_payload = payload.get("normalization")
+        if not isinstance(channel_layout_payload, dict):
+            raise ValueError("autoencoder_knn pretrained checkpoint is missing channel_layout")
+        if not isinstance(normalization_payload, dict):
+            raise ValueError("autoencoder_knn pretrained checkpoint is missing normalization")
+
+        channel_layout = _channel_layout_from_payload(channel_layout_payload)
+        channel_mean = np.asarray(normalization_payload.get("channel_mean"), dtype=np.float32)
+        channel_std = np.asarray(normalization_payload.get("channel_std"), dtype=np.float32)
+        if channel_mean.ndim != 1 or channel_std.ndim != 1 or channel_mean.shape != channel_std.shape:
+            raise ValueError("autoencoder_knn pretrained checkpoint normalization arrays must be aligned 1D arrays")
+
+        autoencoder_state_dict = payload.get("autoencoder_state_dict")
+        if not isinstance(autoencoder_state_dict, dict):
+            raise ValueError("autoencoder_knn pretrained checkpoint is missing autoencoder_state_dict")
+
+        config = payload.get("config")
+        if isinstance(config, dict) and config.get("input_channels") is not None:
+            self.input_channels_ = int(config.get("input_channels"))
+        else:
+            self.input_channels_ = int(channel_layout.input_dim)
+
+        self._pretrained_checkpoint_payload = payload
+        self._pretrained_autoencoder_state_dict = autoencoder_state_dict
+        self.channel_layout_ = channel_layout
+        self.normalization_stats_ = CNNNormalizationStats(
+            channel_mean=channel_mean,
+            channel_std=channel_std,
+        )
+        self.channel_mean_ = channel_mean
+        self.channel_std_ = channel_std
+
     def _move_batch_to_device(self, batch_inputs: Any) -> Any:
         assert torch is not None
         return batch_inputs.to(self.device_, non_blocking=False)
@@ -433,6 +490,9 @@ class AutoencoderKNNSupervisedModel:
         self._set_random_seeds()
         self._set_threads(n_jobs)
 
+        if self.pretrained_checkpoint is not None:
+            self._load_pretrained_checkpoint_metadata()
+
         train_tensors = self._prepare_numpy_inputs(bundle)
         y_train = np.asarray(labels, dtype=np.int64).reshape(-1)
         
@@ -455,96 +515,104 @@ class AutoencoderKNNSupervisedModel:
         self.autoencoder_ = self._build_autoencoder(
             input_channels=int(train_tensors.inputs.shape[2])
         )
+        if self._pretrained_autoencoder_state_dict is not None:
+            self.autoencoder_.load_state_dict(self._pretrained_autoencoder_state_dict)
         
-        optimizer = torch.optim.AdamW(
-            self.autoencoder_.parameters(),
-            lr=float(self.learning_rate),
-            weight_decay=float(self.weight_decay),
-        )
-        
-        best_state = None
-        best_metric = math.inf
+        best_state = {
+            key: value.detach().cpu().clone()
+            for key, value in self.autoencoder_.state_dict().items()
+        }
+        best_metric: float | None = None
         best_epoch = -1
-        stale_epochs = 0
         self._encoder_history = []
-        
-        for epoch_idx in range(self.max_epochs):
-            self.autoencoder_.train()
-            epoch_loss = 0.0
-            batch_count = 0
-            
-            for batch_inputs, batch_layer_mask in train_loader:
-                batch_inputs = self._move_batch_to_device(batch_inputs)
-                batch_layer_mask = batch_layer_mask.to(self.device_)
-                optimizer.zero_grad()
-                reconstructed, _ = self.autoencoder_(batch_inputs, batch_layer_mask)
-                valid_mask = batch_layer_mask.unsqueeze(-1).to(dtype=batch_inputs.dtype)
-                squared_error = torch.square(reconstructed - batch_inputs) * valid_mask
-                loss = torch.sum(squared_error) / torch.clamp(torch.sum(valid_mask), min=1.0)
-                loss.backward()
-                optimizer.step()
-                
-                epoch_loss += float(loss.detach().cpu().item())
-                batch_count += 1
-            
-            avg_loss = epoch_loss / max(1, batch_count)
-            
-            # Validation on reconstruction loss
-            if validation_data is not None:
-                valid_bundle, valid_labels = validation_data
-                valid_tensors = self._prepare_numpy_inputs(valid_bundle)
-                valid_dataset = TensorDataset(
-                    torch.from_numpy(valid_tensors.inputs),
-                    torch.from_numpy(valid_tensors.layer_mask),
-                )
-                valid_loader = DataLoader(
-                    valid_dataset,
-                    batch_size=min(self.batch_size, max(1, len(valid_dataset))),
-                    shuffle=False,
-                )
-                
-                self.autoencoder_.eval()
-                valid_loss = 0.0
-                valid_count = 0
-                with torch.no_grad():
-                    for batch_inputs, batch_layer_mask in valid_loader:
-                        batch_inputs = self._move_batch_to_device(batch_inputs)
-                        batch_layer_mask = batch_layer_mask.to(self.device_)
-                        reconstructed, _ = self.autoencoder_(batch_inputs, batch_layer_mask)
-                        valid_mask = batch_layer_mask.unsqueeze(-1).to(dtype=batch_inputs.dtype)
-                        squared_error = torch.square(reconstructed - batch_inputs) * valid_mask
-                        loss = torch.sum(squared_error) / torch.clamp(torch.sum(valid_mask), min=1.0)
-                        valid_loss += float(loss.detach().cpu().item())
-                        valid_count += 1
-                
-                metric = valid_loss / max(1, valid_count)
-            else:
-                metric = avg_loss
-            
-            self._encoder_history.append({
-                "epoch": float(epoch_idx),
-                "train_loss": float(avg_loss),
-                "selection_metric": float(metric),
-                "selection_metric_name": "reconstruction_mse",
-            })
-            
-            if metric < best_metric:
-                best_metric = float(metric)
-                best_epoch = int(epoch_idx)
-                best_state = {
-                    key: value.detach().cpu().clone()
-                    for key, value in self.autoencoder_.state_dict().items()
-                }
-                stale_epochs = 0
-            else:
-                stale_epochs += 1
-            
-            if validation_data is not None and stale_epochs >= self.patience:
-                break
-        
-        if best_state is None:
-            raise RuntimeError("autoencoder_knn training did not produce a valid checkpoint")
-        
+
+        if not self.no_train:
+            optimizer = torch.optim.AdamW(
+                self.autoencoder_.parameters(),
+                lr=float(self.learning_rate),
+                weight_decay=float(self.weight_decay),
+            )
+            best_metric_value = math.inf
+            stale_epochs = 0
+
+            for epoch_idx in range(self.max_epochs):
+                self.autoencoder_.train()
+                epoch_loss = 0.0
+                batch_count = 0
+
+                for batch_inputs, batch_layer_mask in train_loader:
+                    batch_inputs = self._move_batch_to_device(batch_inputs)
+                    batch_layer_mask = batch_layer_mask.to(self.device_)
+                    optimizer.zero_grad()
+                    reconstructed, _ = self.autoencoder_(batch_inputs, batch_layer_mask)
+                    valid_mask = batch_layer_mask.unsqueeze(-1).to(dtype=batch_inputs.dtype)
+                    squared_error = torch.square(reconstructed - batch_inputs) * valid_mask
+                    loss = torch.sum(squared_error) / torch.clamp(torch.sum(valid_mask), min=1.0)
+                    loss.backward()
+                    optimizer.step()
+
+                    epoch_loss += float(loss.detach().cpu().item())
+                    batch_count += 1
+
+                avg_loss = epoch_loss / max(1, batch_count)
+
+                # Validation on reconstruction loss
+                if validation_data is not None:
+                    valid_bundle, valid_labels = validation_data
+                    valid_tensors = self._prepare_numpy_inputs(valid_bundle)
+                    valid_dataset = TensorDataset(
+                        torch.from_numpy(valid_tensors.inputs),
+                        torch.from_numpy(valid_tensors.layer_mask),
+                    )
+                    valid_loader = DataLoader(
+                        valid_dataset,
+                        batch_size=min(self.batch_size, max(1, len(valid_dataset))),
+                        shuffle=False,
+                    )
+
+                    self.autoencoder_.eval()
+                    valid_loss = 0.0
+                    valid_count = 0
+                    with torch.no_grad():
+                        for batch_inputs, batch_layer_mask in valid_loader:
+                            batch_inputs = self._move_batch_to_device(batch_inputs)
+                            batch_layer_mask = batch_layer_mask.to(self.device_)
+                            reconstructed, _ = self.autoencoder_(batch_inputs, batch_layer_mask)
+                            valid_mask = batch_layer_mask.unsqueeze(-1).to(dtype=batch_inputs.dtype)
+                            squared_error = torch.square(reconstructed - batch_inputs) * valid_mask
+                            loss = torch.sum(squared_error) / torch.clamp(torch.sum(valid_mask), min=1.0)
+                            valid_loss += float(loss.detach().cpu().item())
+                            valid_count += 1
+
+                    metric = valid_loss / max(1, valid_count)
+                else:
+                    metric = avg_loss
+
+                self._encoder_history.append({
+                    "epoch": float(epoch_idx),
+                    "train_loss": float(avg_loss),
+                    "selection_metric": float(metric),
+                    "selection_metric_name": "reconstruction_mse",
+                })
+
+                if metric < best_metric_value:
+                    best_metric_value = float(metric)
+                    best_epoch = int(epoch_idx)
+                    best_state = {
+                        key: value.detach().cpu().clone()
+                        for key, value in self.autoencoder_.state_dict().items()
+                    }
+                    stale_epochs = 0
+                else:
+                    stale_epochs += 1
+
+                if validation_data is not None and stale_epochs >= self.patience:
+                    break
+
+            best_metric = float(best_metric_value)
+        else:
+            self.autoencoder_.eval()
+
         self.autoencoder_.load_state_dict(best_state)
         
         # ============================================================
@@ -570,8 +638,8 @@ class AutoencoderKNNSupervisedModel:
         
         self._fit_summary = {
             "best_epoch": int(best_epoch),
-            "selection_metric": float(best_metric),
-            "selection_metric_name": "reconstruction_mse",
+            "selection_metric": None if best_metric is None else float(best_metric),
+            "selection_metric_name": "pretrained_checkpoint" if self.no_train else "reconstruction_mse",
             "epochs_ran": int(len(self._encoder_history)),
             "history": self._encoder_history,
             "feature_dim": int(self.feature_dim_ or 0),
@@ -579,6 +647,11 @@ class AutoencoderKNNSupervisedModel:
             "n_neighbors": int(self.n_neighbors),
             "class_weight_loss": bool(self.class_weight_loss),
             "rank_label_weight_loss": bool(self.rank_label_weight_loss),
+            "training_mode": "pretrained_frozen"
+            if self.no_train
+            else ("pretrained_finetune" if self._pretrained_autoencoder_state_dict is not None else "scratch"),
+            "pretrained_checkpoint": self.pretrained_checkpoint,
+            "no_train": bool(self.no_train),
         }
         return self
 
@@ -728,6 +801,8 @@ class AutoencoderKNNSupervisedModel:
                 "learning_rate": float(self.learning_rate),
                 "weight_decay": float(self.weight_decay),
                 "random_state": int(self.random_state),
+                "pretrained_checkpoint": self.pretrained_checkpoint,
+                "no_train": bool(self.no_train),
                 "max_epochs": int(self.max_epochs),
                 "batch_size": int(self.batch_size),
                 "patience": int(self.patience),
@@ -792,6 +867,8 @@ def load_autoencoder_knn_checkpoint(
         include_total_layer_count=bool(config.get("include_total_layer_count", True)),
         depth_feature_mode=str(config.get("depth_feature_mode", "both")),
         device=chosen_device,
+        pretrained_checkpoint=config.get("pretrained_checkpoint"),
+        no_train=bool(config.get("no_train", False)),
         learning_rate=float(config["learning_rate"]),
         weight_decay=float(config["weight_decay"]),
         random_state=int(config.get("random_state", 42)),

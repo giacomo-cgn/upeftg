@@ -4214,6 +4214,11 @@ def _prepare_supervised_finalize(
         ),
     )
 
+    if winner_backend in ("cnn", "autoencoder_knn") and isinstance(x_train, SupervisedFeatureBundle):
+        train_features = model.extract_features(x_train)
+        train_features_path = ctx.reports_dir / "train_features.npy"
+        np.save(train_features_path, train_features)
+
     calibration_scores_csv: Path | None = None
     calibration_score_summary: dict[str, Any] | None = None
     calibration_offline_metrics: dict[str, Any] | None = None

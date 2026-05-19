@@ -40,6 +40,19 @@ CNN_1D_HYPERPARAM_NAMES = (
 CNN_1D_MODEL_NAME = "cnn_1d"
 CNN_1D_DANN_MODEL_NAME = "cnn_1d_dann"
 AUTOENCODER_KNN_MODEL_NAME = "autoencoder_knn"
+AUTOENCODER_KNN_HYPERPARAM_NAMES = (
+    "conv_channels",
+    "num_conv_layers",
+    "kernel_size",
+    "n_neighbors",
+    "dropout",
+    "learning_rate",
+    "weight_decay",
+)
+AUTOENCODER_KNN_PRETRAINED_HYPERPARAM_NAMES = AUTOENCODER_KNN_HYPERPARAM_NAMES + (
+    "pretrained_checkpoint",
+    "no_train",
+)
 _CNN_1D_INTEGER_HYPERPARAMS = {"conv_channels", "num_conv_layers", "kernel_size"}
 _CNN_1D_FLOAT_HYPERPARAMS = {"dropout", "learning_rate", "weight_decay"}
 
@@ -161,30 +174,31 @@ def resolve_cnn_hyperparams(
 
 def _normalize_autoencoder_hyperparam_axes(payload: dict[str, Any]) -> dict[str, list[Any]]:
     raw_keys = {str(key) for key in payload.keys()}
-    expected_keys = {
-        "conv_channels",
-        "num_conv_layers",
-        "kernel_size",
-        "n_neighbors",
-        "dropout",
-        "learning_rate",
-        "weight_decay",
-    }
-    missing = sorted(expected_keys - raw_keys)
-    extra = sorted(raw_keys - expected_keys)
-    if missing or extra:
+    base_expected_keys = set(AUTOENCODER_KNN_HYPERPARAM_NAMES)
+    pretrained_expected_keys = set(AUTOENCODER_KNN_PRETRAINED_HYPERPARAM_NAMES)
+    if raw_keys == base_expected_keys:
+        expected_keys = AUTOENCODER_KNN_HYPERPARAM_NAMES
+    elif raw_keys == pretrained_expected_keys:
+        expected_keys = AUTOENCODER_KNN_PRETRAINED_HYPERPARAM_NAMES
+    else:
+        missing_base = sorted(base_expected_keys - raw_keys)
+        missing_pretrained = sorted(pretrained_expected_keys - raw_keys)
+        extra = sorted(raw_keys - pretrained_expected_keys)
         details: list[str] = []
-        if missing:
-            details.append(f"missing={missing}")
+        if missing_base:
+            details.append(f"missing_base={missing_base}")
+        if missing_pretrained and missing_pretrained != missing_base:
+            details.append(f"missing_pretrained={missing_pretrained}")
         if extra:
             details.append(f"extra={extra}")
         raise ValueError(
             "autoencoder hyperparameter JSON must define exactly these keys: "
-            f"{sorted(expected_keys)} ({'; '.join(details)})"
+            f"{list(AUTOENCODER_KNN_HYPERPARAM_NAMES)} or {list(AUTOENCODER_KNN_PRETRAINED_HYPERPARAM_NAMES)}"
+            f" ({'; '.join(details)})"
         )
 
     normalized: dict[str, list[Any]] = {}
-    for name in sorted(expected_keys):
+    for name in expected_keys:
         raw_values = payload.get(name)
         if not isinstance(raw_values, list) or not raw_values:
             raise ValueError(
@@ -194,6 +208,13 @@ def _normalize_autoencoder_hyperparam_axes(payload: dict[str, Any]) -> dict[str,
             normalized[name] = [int(value) for value in raw_values]
         elif name in {"dropout", "learning_rate", "weight_decay"}:
             normalized[name] = [float(value) for value in raw_values]
+        elif name == "pretrained_checkpoint":
+            normalized[name] = [
+                None if value is None or str(value).strip() == "" else str(Path(value).expanduser().resolve())
+                for value in raw_values
+            ]
+        elif name == "no_train":
+            normalized[name] = [bool(value) for value in raw_values]
         else:
             raise ValueError(f"Unsupported autoencoder hyperparameter axis {name!r}")
     return normalized
@@ -331,6 +352,8 @@ def _create_autoencoder_knn(
         weight_decay=float(params.get("weight_decay", 0.0)),
         random_state=int(random_state),
         task_spec=task_spec,
+        pretrained_checkpoint=params.get("pretrained_checkpoint"),
+        no_train=bool(params.get("no_train", False)),
         class_weight_loss=bool(params.get("class_weight_loss", False)),
         rank_label_weight_loss=bool(params.get("rank_label_weight_loss", False)),
     )
