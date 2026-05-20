@@ -1,0 +1,11 @@
+{
+  "conv_channels": [32],
+  "num_conv_layers": [2],
+  "kernel_size": [5],
+  "n_neighbors": [5],
+  "dropout": [0.0],
+  "learning_rate": [0.1],
+  "weight_decay": [0.00001],
+  "pretrained_checkpoint": ["/home/giacomo/Desktop/peft_attacks/autoencoder_tbh_alpaca_clean/models/best_model.pt"],
+  "no_train": [true]
+}
