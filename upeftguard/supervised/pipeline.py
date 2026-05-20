@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import csv
 from pathlib import Path
 import re
 from time import perf_counter
@@ -4214,6 +4215,23 @@ def _prepare_supervised_finalize(
         ),
     )
 
+    # If model is autoencoder and we are running with no_train (pretrained frozen),
+    # save per-sample reconstruction loss for the training set in the same order
+    # as `train_scores.csv` so they can be aligned easily.
+    if (
+        winner_backend in ("cnn", "autoencoder_knn")
+        and isinstance(x_train, SupervisedFeatureBundle)
+        and getattr(model, "no_train", False)
+        and hasattr(model, "reconstruction_losses")
+    ):
+        train_losses = model.reconstruction_losses(x_train)
+        train_losses_csv = ctx.reports_dir / "train_reconstruction_loss.csv"
+        with open(train_losses_csv, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["index", "model_name", "loss"])
+            for i, (name, loss) in enumerate(zip(train_model_names, train_losses)):
+                writer.writerow([i, name, float(loss)])
+
     if winner_backend in ("cnn", "autoencoder_knn") and isinstance(x_train, SupervisedFeatureBundle):
         train_features = model.extract_features(x_train)
         train_features_path = ctx.reports_dir / "train_features.npy"
@@ -4322,6 +4340,20 @@ def _prepare_supervised_finalize(
                 open_set_result=infer_open_set_result,
             ),
         )
+
+        # Save per-sample reconstruction loss for inference set (same order as inference_scores.csv)
+        if (
+            winner_backend in ("cnn", "autoencoder_knn")
+            and isinstance(x_infer, SupervisedFeatureBundle)
+            and hasattr(model, "reconstruction_losses")
+        ):
+            infer_losses = model.reconstruction_losses(x_infer)
+            infer_losses_csv = ctx.reports_dir / "inference_reconstruction_loss.csv"
+            with open(infer_losses_csv, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["index", "model_name", "loss"])
+                for i, (name, loss) in enumerate(zip(infer_model_names, infer_losses)):
+                    writer.writerow([i, name, float(loss)])
 
         # Extract and save evaluation set features (for cnn and autoencoder_knn backends)
         if winner_backend in ("cnn", "autoencoder_knn") and isinstance(x_infer, SupervisedFeatureBundle):

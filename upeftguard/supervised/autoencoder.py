@@ -744,6 +744,48 @@ class AutoencoderKNNSupervisedModel:
         features = self._extract_features_from_loader(loader)
         return self.knn_classifier_.predict(features).astype(np.int32, copy=False)
 
+    def reconstruction_losses(self, bundle: SupervisedFeatureBundle) -> np.ndarray:
+        """Compute per-sample reconstruction loss (MSE over valid elements) for a bundle.
+
+        Returns a 1-D float64 numpy array with one loss per sample in the same order
+        as the rows that would be written by `save_score_csv` (i.e., bundle order).
+        """
+        _require_torch()
+        assert torch is not None
+        if self.autoencoder_ is None:
+            raise RuntimeError("autoencoder_knn autoencoder has not been fit")
+
+        tensors = self._prepare_numpy_inputs(bundle)
+        dataset = TensorDataset(
+            torch.from_numpy(tensors.inputs),
+            torch.from_numpy(tensors.layer_mask),
+        )
+        loader = DataLoader(
+            dataset,
+            batch_size=min(self.batch_size, max(1, len(dataset))),
+            shuffle=False,
+        )
+
+        self.autoencoder_.eval()
+        losses: list[np.ndarray] = []
+        with torch.no_grad():
+            for batch_inputs, batch_layer_mask in loader:
+                batch_inputs = self._move_batch_to_device(batch_inputs)
+                layer_mask_device = batch_layer_mask.to(self.device_)
+                reconstructed, _ = self.autoencoder_(batch_inputs, layer_mask_device)
+                valid_mask = batch_layer_mask.unsqueeze(-1).to(dtype=batch_inputs.dtype)
+                squared_error = torch.square(reconstructed - batch_inputs) * valid_mask
+                per_sample_sum = torch.sum(squared_error, dim=(1, 2))
+                per_sample_count = torch.clamp(torch.sum(valid_mask, dim=(1, 2)), min=1.0)
+                per_sample_loss = (per_sample_sum / per_sample_count).detach().cpu().numpy().astype(
+                    np.float64
+                )
+                losses.append(per_sample_loss)
+
+        if not losses:
+            return np.asarray([], dtype=np.float64)
+        return np.concatenate(losses, axis=0).astype(np.float64, copy=False)
+
     @property
     def fit_summary(self) -> dict[str, Any]:
         """Get the fit summary containing training details and history."""
