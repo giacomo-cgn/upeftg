@@ -947,8 +947,7 @@ def _build_single_manifest_stratified_split(
         )
 
     unique, counts = np.unique(labels, return_counts=True)
-    if unique.size < 2:
-        raise ValueError("Stratified --train-split requires at least two classes in a single manifest")
+    single_class_holdout = bool(unique.size < 2)
 
     rng = np.random.default_rng(random_state)
     train_parts: list[np.ndarray] = []
@@ -986,6 +985,10 @@ def _build_single_manifest_stratified_split(
     infer_indices = np.sort(np.concatenate(infer_parts).astype(np.int64, copy=False))
 
     warnings: list[str] = []
+    if single_class_holdout:
+        warnings.append(
+            "Only one class label found in the manifest; the holdout split will contain that single class only"
+        )
     if adjusted_labels:
         adjusted_preview = ", ".join(str(label) for label in adjusted_labels[:5])
         warnings.append(
@@ -1024,8 +1027,7 @@ def _build_single_manifest_folder_label_split(
         raise ValueError("Folder-based split requires one label per manifest item")
 
     all_indices = np.arange(labels.shape[0], dtype=np.int64)
-    if train_split_percent < 100 and np.unique(labels).size < 2:
-        raise ValueError("Folder-based --train-split requires at least two classes in a single manifest")
+    single_class_holdout = bool(train_split_percent < 100 and np.unique(labels).size < 2)
 
     bucket_to_indices: dict[tuple[str, int], list[int]] = {}
     for idx, item in enumerate(items):
@@ -1083,6 +1085,10 @@ def _build_single_manifest_folder_label_split(
     )
 
     warnings: list[str] = []
+    if single_class_holdout:
+        warnings.append(
+            "Only one class label found in the manifest; the holdout split will contain that single class only"
+        )
     if adjusted_buckets:
         adjusted_preview = ", ".join(adjusted_buckets[:5])
         warnings.append(
@@ -1119,8 +1125,7 @@ def _build_calibration_stratified_split(
     candidate_indices = np.asarray(candidate_indices, dtype=np.int64)
     candidate_labels = labels[candidate_indices]
     unique, counts = np.unique(candidate_labels, return_counts=True)
-    if unique.size < 2:
-        raise ValueError("Calibration split requires at least two classes in the training partition")
+    single_class_holdout = bool(unique.size < 2)
 
     rng = np.random.default_rng(random_state)
     fit_parts: list[np.ndarray] = []
@@ -1158,6 +1163,10 @@ def _build_calibration_stratified_split(
     calibration_indices = np.sort(np.concatenate(calibration_parts).astype(np.int64, copy=False))
 
     warnings: list[str] = []
+    if single_class_holdout:
+        warnings.append(
+            "Only one class label found in the training partition; the calibration split will contain that single class only"
+        )
     if adjusted_labels:
         adjusted_preview = ", ".join(str(label) for label in adjusted_labels[:5])
         warnings.append(
@@ -1378,8 +1387,7 @@ def _build_calibration_folder_label_split(
 
     candidate_indices = np.asarray(candidate_indices, dtype=np.int64)
     candidate_labels = labels[candidate_indices]
-    if np.unique(candidate_labels).size < 2:
-        raise ValueError("Folder-based calibration split requires at least two classes in the training partition")
+    single_class_holdout = bool(np.unique(candidate_labels).size < 2)
 
     bucket_to_indices: dict[tuple[str, int], list[int]] = {}
     for idx in candidate_indices.tolist():
@@ -1423,6 +1431,10 @@ def _build_calibration_folder_label_split(
     calibration_indices = np.sort(np.concatenate(calibration_parts).astype(np.int64, copy=False))
 
     warnings: list[str] = []
+    if single_class_holdout:
+        warnings.append(
+            "Only one class label found in the training partition; the calibration split will contain that single class only"
+        )
     if adjusted_buckets:
         adjusted_preview = ", ".join(adjusted_buckets[:5])
         warnings.append(
@@ -2326,8 +2338,6 @@ def _compact_indices_to_selected_scope(
 
 def _validated_train_label_counts(labels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     unique, counts = np.unique(labels, return_counts=True)
-    if unique.size < 2:
-        raise ValueError("Supervised classification requires at least two classes in the training set")
     return unique, counts
 
 
@@ -2451,6 +2461,20 @@ def _align_task_matrix(
     matrix = np.asarray(values, dtype=np.float64)
     if matrix.ndim != 2:
         raise ValueError(f"Expected a 2D class-output matrix, got shape={matrix.shape}")
+    if task_spec.n_classes == 2 and matrix.shape[1] == 1:
+        if observed_classes is not None and int(observed_classes.shape[0]) == 1:
+            column_class_index = int(observed_classes[0])
+        else:
+            column_class_index = 1 if int(task_spec.clean_class_index) == 0 else 0
+        if column_class_index not in (0, 1):
+            raise ValueError(
+                "Observed class index for binary alignment is outside the expected range: "
+                f"{column_class_index}"
+            )
+        aligned = np.zeros((matrix.shape[0], 2), dtype=np.float64)
+        aligned[:, column_class_index] = matrix[:, 0]
+        aligned[:, 1 - column_class_index] = 1.0 - matrix[:, 0]
+        return aligned
     if matrix.shape[1] == task_spec.n_classes and observed_classes is None:
         return np.asarray(matrix, dtype=np.float64)
     if observed_classes is None:
