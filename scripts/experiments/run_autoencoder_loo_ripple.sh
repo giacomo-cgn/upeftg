@@ -26,10 +26,11 @@ DRY_RUN=${DRY_RUN:-0}
 CLASS_WEIGHT_LOSS=${CLASS_WEIGHT_LOSS:-0}
 RANK_LABEL_WEIGHT_LOSS=${RANK_LABEL_WEIGHT_LOSS:-0}
 
-RUN_ID=${RUN_ID:-autoenceder_pretr_clean_squad_insertsent}
-MANIFEST_JSON=${MANIFEST_JSON:-${REPO_ROOT}/manifests/single_datasets/llama2_7b_squad_insertsent.json}
+RUN_ID=${RUN_ID:-autoencoder_loo_ripple}
+MANIFEST_JSON=${MANIFEST_JSON:-${REPO_ROOT}/manifests/selfsupervised_hyperparams/autoencoder_loo/ag_news_imdb_loo_ripple.json}
 FEATURE_FILE=${FEATURE_FILE:-${REPO_ROOT}/runs/feature_extract/list2_features-merged-cnn/merged/spectral_features.npy}
-AUTOENCODER_HYPERPARAMS=${AUTOENCODER_HYPERPARAMS:-${REPO_ROOT}/manifests/selfsupervised_hyperparams/autoencoder_pretrained_hyperparams.json}
+AUTOENCODER_HYPERPARAMS=${AUTOENCODER_HYPERPARAMS:-${REPO_ROOT}/manifests/selfsupervised_hyperparams/autoencoder_loo/autoencoder_hyperparams.json}
+
 FEATURES=(
   energy
   kurtosis
@@ -52,10 +53,10 @@ COMMON_ARGS=(
   --autoencoder-hyperparams "${AUTOENCODER_HYPERPARAMS}"
   --dataset-root "${DATASET_ROOT}"
   --output-root "${OUTPUT_ROOT}"
-  --train-split 80
-  --calibration-split 20
-  --accepted-fpr 0.01 0.05 0.1
-  --split-by-folder
+  # --train-split 80
+  # --calibration-split 20
+  # --accepted-fpr 0.01 0.05 0.1
+  # --split-by-folder
   --cv-folds 5
   --cv-seeds 42
   --random-state 42

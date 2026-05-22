@@ -29,7 +29,7 @@ RANK_LABEL_WEIGHT_LOSS=${RANK_LABEL_WEIGHT_LOSS:-0}
 RUN_ID=${RUN_ID:-autoenceder_pretr_clean_imdb_stybkd}
 MANIFEST_JSON=${MANIFEST_JSON:-${REPO_ROOT}/manifests/single_datasets/llama2_7b_imdb_stybkd.json}
 FEATURE_FILE=${FEATURE_FILE:-${REPO_ROOT}/runs/feature_extract/list2_features-merged-cnn/merged/spectral_features.npy}
-AUTOENCODER_HYPERPARAMS=${AUTOENCODER_HYPERPARAMS:-${REPO_ROOT}/manifests/selfsupervised_hyperparams/autoencoder_pretrained_hyperparams.json}
+AUTOENCODER_HYPERPARAMS=${AUTOENCODER_HYPERPARAMS:-${REPO_ROOT}/manifests/selfsupervised_hyperparams/autoencoder_pretr_clean_hyperparams.json}
 FEATURES=(
   energy
   kurtosis

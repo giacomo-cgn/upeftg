@@ -26,10 +26,10 @@ DRY_RUN=${DRY_RUN:-0}
 CLASS_WEIGHT_LOSS=${CLASS_WEIGHT_LOSS:-0}
 RANK_LABEL_WEIGHT_LOSS=${RANK_LABEL_WEIGHT_LOSS:-0}
 
-RUN_ID=${RUN_ID:-autoenceder_pretr_clean_ag_news_syntactic}
-MANIFEST_JSON=${MANIFEST_JSON:-${REPO_ROOT}/manifests/single_datasets/llama2_7b_ag_news_syntactic.json}
+RUN_ID=${RUN_ID:-few_shot_cnn_syntactic}
+MANIFEST_JSON=${MANIFEST_JSON:-${REPO_ROOT}/manifests/few_shot/few_shot_knn_syntactic_data.json}
 FEATURE_FILE=${FEATURE_FILE:-${REPO_ROOT}/runs/feature_extract/list2_features-merged-cnn/merged/spectral_features.npy}
-AUTOENCODER_HYPERPARAMS=${AUTOENCODER_HYPERPARAMS:-${REPO_ROOT}/manifests/selfsupervised_hyperparams/autoencoder_pretrained_hyperparams.json}
+FEW_SHOT_HYPERPARAMS=${FEW_SHOT_HYPERPARAMS:-${REPO_ROOT}/manifests/few_shot/few_shot_knn_syntactic_hyperparams.json}
 FEATURES=(
   energy
   kurtosis
@@ -48,8 +48,8 @@ COMMON_ARGS=(
   python -m upeftguard.cli run supervised
   --feature-file "${FEATURE_FILE}"
   --features "${FEATURES[@]}"
-  --model autoencoder_knn
-  --autoencoder-hyperparams "${AUTOENCODER_HYPERPARAMS}"
+  --model few_shot_cnn
+  --few-shot-hyperparams "${FEW_SHOT_HYPERPARAMS}"
   --dataset-root "${DATASET_ROOT}"
   --output-root "${OUTPUT_ROOT}"
   --train-split 80

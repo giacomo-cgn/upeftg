@@ -1,0 +1,32 @@
+{
+  "path": [
+    {
+      "path": "llama2_7b_ag_news_insertsent_rank256_qv/llama2_7b_ag_news_insertsent_rank256_qv_label0_",
+      "indices": [
+        125,
+        249
+      ]
+    },
+    {
+      "path": "llama2_7b_ag_news_stybkd_rank256_qv/llama2_7b_ag_news_stybkd_rank256_qv_label1_",
+      "indices": [
+        0,
+        249
+      ]
+    },
+    {
+      "path": "llama2_7b_imdb_insertsent_rank256_qv/llama2_7b_imdb_insertsent_rank256_qv_label0_",
+      "indices": [
+        125,
+        249
+      ]
+    },
+    {
+      "path": "llama2_7b_imdb_stybkd_rank256_qv/llama2_7b_imdb_stybkd_rank256_qv_label1_",
+      "indices": [
+        0,
+        249
+      ]
+    }
+  ]
+}

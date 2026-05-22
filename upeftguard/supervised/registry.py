@@ -45,6 +45,7 @@ AUTOENCODER_KNN_HYPERPARAM_NAMES = (
     "num_conv_layers",
     "kernel_size",
     "n_neighbors",
+    "knn",
     "dropout",
     "learning_rate",
     "weight_decay",
@@ -52,6 +53,11 @@ AUTOENCODER_KNN_HYPERPARAM_NAMES = (
 AUTOENCODER_KNN_PRETRAINED_HYPERPARAM_NAMES = AUTOENCODER_KNN_HYPERPARAM_NAMES + (
     "pretrained_checkpoint",
     "no_train",
+)
+FEW_SHOT_CNN_MODEL_NAME = "few_shot_cnn"
+FEW_SHOT_CNN_HYPERPARAM_NAMES = (
+    "k_knn",
+    "n_few_shot_per_class",
 )
 _CNN_1D_INTEGER_HYPERPARAMS = {"conv_channels", "num_conv_layers", "kernel_size"}
 _CNN_1D_FLOAT_HYPERPARAMS = {"dropout", "learning_rate", "weight_decay"}
@@ -92,6 +98,10 @@ def default_cnn_hyperparams_path() -> Path:
 
 def default_autoencoder_hyperparams_path() -> Path:
     return Path(__file__).resolve().parents[2] / "manifests" / "selfsupervised_hyperparams" / "autoencoder_hyperparams.json"
+
+
+def default_few_shot_hyperparams_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "manifests" / "few_shot" / "few_shot_knn.json"
 
 
 def _load_json_object(path: Path) -> dict[str, Any]:
@@ -176,10 +186,19 @@ def _normalize_autoencoder_hyperparam_axes(payload: dict[str, Any]) -> dict[str,
     raw_keys = {str(key) for key in payload.keys()}
     base_expected_keys = set(AUTOENCODER_KNN_HYPERPARAM_NAMES)
     pretrained_expected_keys = set(AUTOENCODER_KNN_PRETRAINED_HYPERPARAM_NAMES)
+    legacy_base_keys = base_expected_keys - {"knn"}
+    legacy_pretrained_keys = pretrained_expected_keys - {"knn"}
+    allow_missing_knn = False
     if raw_keys == base_expected_keys:
         expected_keys = AUTOENCODER_KNN_HYPERPARAM_NAMES
     elif raw_keys == pretrained_expected_keys:
         expected_keys = AUTOENCODER_KNN_PRETRAINED_HYPERPARAM_NAMES
+    elif raw_keys == legacy_base_keys:
+        expected_keys = AUTOENCODER_KNN_HYPERPARAM_NAMES
+        allow_missing_knn = True
+    elif raw_keys == legacy_pretrained_keys:
+        expected_keys = AUTOENCODER_KNN_PRETRAINED_HYPERPARAM_NAMES
+        allow_missing_knn = True
     else:
         missing_base = sorted(base_expected_keys - raw_keys)
         missing_pretrained = sorted(pretrained_expected_keys - raw_keys)
@@ -200,12 +219,16 @@ def _normalize_autoencoder_hyperparam_axes(payload: dict[str, Any]) -> dict[str,
     normalized: dict[str, list[Any]] = {}
     for name in expected_keys:
         raw_values = payload.get(name)
+        if raw_values is None and name == "knn" and allow_missing_knn:
+            raw_values = [True]
         if not isinstance(raw_values, list) or not raw_values:
             raise ValueError(
                 f"autoencoder hyperparameter '{name}' must be a non-empty JSON list, got {type(raw_values).__name__}"
             )
         if name in {"conv_channels", "num_conv_layers", "kernel_size", "n_neighbors"}:
             normalized[name] = [int(value) for value in raw_values]
+        elif name == "knn":
+            normalized[name] = [bool(value) for value in raw_values]
         elif name in {"dropout", "learning_rate", "weight_decay"}:
             normalized[name] = [float(value) for value in raw_values]
         elif name == "pretrained_checkpoint":
@@ -245,6 +268,81 @@ def resolve_autoencoder_hyperparams(
         }
 
     axes = _normalize_autoencoder_hyperparam_axes(payload)
+    metadata = {
+        **source,
+        "axes": {name: list(values) for name, values in axes.items()},
+        "n_candidates": int(len(_grid(**axes))),
+    }
+    return axes, metadata
+
+
+def _normalize_few_shot_hyperparam_axes(payload: dict[str, Any]) -> dict[str, list[Any]]:
+    raw_keys = {str(key) for key in payload.keys()}
+    expected_keys = set(FEW_SHOT_CNN_HYPERPARAM_NAMES)
+    optional_keys = {"pretrained_checkpoint"}
+    missing = sorted(expected_keys - raw_keys)
+    extra = sorted(raw_keys - expected_keys - optional_keys)
+    if missing or extra:
+        details: list[str] = []
+        if missing:
+            details.append(f"missing={missing}")
+        if extra:
+            details.append(f"extra={extra}")
+        raise ValueError(
+            "few_shot_cnn hyperparameter JSON must define exactly these keys: "
+            f"{list(FEW_SHOT_CNN_HYPERPARAM_NAMES)} ({'; '.join(details)})"
+        )
+
+    normalized: dict[str, list[Any]] = {}
+    for name in FEW_SHOT_CNN_HYPERPARAM_NAMES:
+        raw_values = payload.get(name)
+        if not isinstance(raw_values, list) or not raw_values:
+            raise ValueError(
+                f"few_shot_cnn hyperparameter '{name}' must be a non-empty JSON list, got {type(raw_values).__name__}"
+            )
+        normalized[name] = [int(value) for value in raw_values]
+
+    if "pretrained_checkpoint" in payload:
+        raw_values = payload.get("pretrained_checkpoint")
+        if not isinstance(raw_values, list) or not raw_values:
+            raise ValueError(
+                "few_shot_cnn hyperparameter 'pretrained_checkpoint' must be a non-empty JSON list"
+            )
+        normalized["pretrained_checkpoint"] = [
+            None
+            if value is None or str(value).strip() == ""
+            else str(Path(value).expanduser().resolve())
+            for value in raw_values
+        ]
+
+    return normalized
+
+
+def resolve_few_shot_hyperparams(
+    few_shot_hyperparams: Path | str | dict[str, Any] | None = None,
+) -> tuple[dict[str, list[Any]], dict[str, Any]]:
+    if few_shot_hyperparams is None:
+        source_path = default_few_shot_hyperparams_path()
+        payload = _load_json_object(source_path)
+        source = {
+            "source": "default_file",
+            "path": str(source_path),
+        }
+    elif isinstance(few_shot_hyperparams, dict):
+        payload = dict(few_shot_hyperparams)
+        source = {
+            "source": "inline_object",
+            "path": None,
+        }
+    else:
+        source_path = Path(few_shot_hyperparams).expanduser().resolve()
+        payload = _load_json_object(source_path)
+        source = {
+            "source": "file",
+            "path": str(source_path),
+        }
+
+    axes = _normalize_few_shot_hyperparam_axes(payload)
     metadata = {
         **source,
         "axes": {name: list(values) for name, values in axes.items()},
@@ -342,6 +440,7 @@ def _create_autoencoder_knn(
         stride=1,
         dilation=1,
         n_neighbors=int(params.get("n_neighbors", 5)),
+        knn=bool(params.get("knn", True)),
         dropout=float(params.get("dropout", 0.1)),
         use_residual=True,
         normalization="layernorm",
@@ -356,6 +455,22 @@ def _create_autoencoder_knn(
         no_train=bool(params.get("no_train", False)),
         class_weight_loss=bool(params.get("class_weight_loss", False)),
         rank_label_weight_loss=bool(params.get("rank_label_weight_loss", False)),
+    )
+
+
+def _create_few_shot_cnn(
+    params: dict[str, Any],
+    random_state: int,
+    task_spec: SupervisedTaskSpec | None,
+) -> Any:
+    from .few_shot_cnn import FewShotCNNSupervisedModel
+
+    return FewShotCNNSupervisedModel(
+        k_knn=int(params.get("k_knn", 5)),
+        n_few_shot_per_class=int(params.get("n_few_shot_per_class", 5)),
+        pretrained_checkpoint=params.get("pretrained_checkpoint"),
+        random_state=int(random_state),
+        task_spec=task_spec,
     )
 
 
@@ -511,6 +626,16 @@ _REGISTRY: dict[str, ModelDefinition] = {
         estimator_factory=_create_autoencoder_knn,
         supported_representation_kinds=(ARCHITECTURE_INDEPENDENT_LAYER_SEQUENCE_KIND,),
     ),
+    FEW_SHOT_CNN_MODEL_NAME: ModelDefinition(
+        name=FEW_SHOT_CNN_MODEL_NAME,
+        backend="cnn",
+        complexity_rank=9,
+        normalization_policy="masked_train_only",
+        normalization_factory=_passthrough,
+        param_grid=(),
+        estimator_factory=_create_few_shot_cnn,
+        supported_representation_kinds=(ARCHITECTURE_INDEPENDENT_LAYER_SEQUENCE_KIND,),
+    ),
 }
 
 
@@ -532,6 +657,7 @@ def candidate_params(
     name: str,
     cnn_hyperparams: Path | str | dict[str, Any] | None = None,
     autoencoder_hyperparams: Path | str | dict[str, Any] | None = None,
+    few_shot_hyperparams: Path | str | dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if name not in _REGISTRY:
         raise ValueError(f"Unknown supervised model '{name}'. Registered: {sorted(_REGISTRY.keys())}")
@@ -540,6 +666,9 @@ def candidate_params(
         return [dict(params) for params in _grid(**axes)]
     if name == AUTOENCODER_KNN_MODEL_NAME:
         axes, _metadata = resolve_autoencoder_hyperparams(autoencoder_hyperparams)
+        return [dict(params) for params in _grid(**axes)]
+    if name == FEW_SHOT_CNN_MODEL_NAME:
+        axes, _metadata = resolve_few_shot_hyperparams(few_shot_hyperparams)
         return [dict(params) for params in _grid(**axes)]
     return [dict(params) for params in _REGISTRY[name].param_grid]
 

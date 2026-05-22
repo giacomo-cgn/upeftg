@@ -31,6 +31,7 @@ from .supervised.pipeline import (
 from .supervised.registry import (
     default_autoencoder_hyperparams_path,
     default_cnn_hyperparams_path,
+    default_few_shot_hyperparams_path,
     registered_models,
 )
 from .unsupervised.analysis import (
@@ -394,6 +395,7 @@ def _cmd_run_supervised(args: argparse.Namespace) -> int:
         ),
         cnn_hyperparams=args.cnn_hyperparams,
         autoencoder_hyperparams=args.autoencoder_hyperparams,
+        few_shot_hyperparams=args.few_shot_hyperparams,
         dann_source_rank=args.dann_source_rank,
         dann_target_adaptation_percent=args.dann_target_adaptation_percent,
         dann_lambda_max=args.dann_lambda_max,
@@ -977,6 +979,17 @@ def build_parser() -> argparse.ArgumentParser:
             "to a list. If every list has one item, autoencoder_knn runs with a fixed configuration; otherwise "
             "the Cartesian grid is evaluated. Defaults to "
             f"{default_autoencoder_hyperparams_path()}."
+        ),
+    )
+    supervised.add_argument(
+        "--few-shot-hyperparams",
+        type=Path,
+        default=None,
+        help=(
+            "Optional JSON file describing the few_shot_cnn hyperparameter search space. Each key must map "
+            "to a list. If every list has one item, few_shot_cnn runs with a fixed configuration; otherwise "
+            "the Cartesian grid is evaluated. Defaults to "
+            f"{default_few_shot_hyperparams_path()}."
         ),
     )
     supervised.add_argument(

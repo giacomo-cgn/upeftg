@@ -86,6 +86,7 @@ from .interfaces import (
     TABULAR_SPECTRAL_REPRESENTATION_KIND,
 )
 from .registry import (
+    FEW_SHOT_CNN_MODEL_NAME,
     CNN_1D_DANN_MODEL_NAME,
     CNN_1D_MODEL_NAME,
     candidate_params,
@@ -96,6 +97,7 @@ from .registry import (
     registered_models,
     resolve_autoencoder_hyperparams,
     resolve_cnn_hyperparams,
+    resolve_few_shot_hyperparams,
     supported_representation_kinds,
 )
 
@@ -3171,6 +3173,7 @@ def _prepare_supervised_run(
     multiclass_attack_names: list[str] | None,
     cnn_hyperparams: Path | None,
     autoencoder_hyperparams: Path | None,
+    few_shot_hyperparams: Path | None,
     dann_source_rank: int,
     dann_target_adaptation_percent: int,
     dann_lambda_max: float,
@@ -3198,6 +3201,8 @@ def _prepare_supervised_run(
         raise ValueError("--cnn-hyperparams is only supported when --model is cnn_1d, cnn_1d_dann, or all")
     if autoencoder_hyperparams is not None and model_name not in {"autoencoder_knn", "all"}:
         raise ValueError("--autoencoder-hyperparams is only supported when --model is autoencoder_knn or all")
+    if few_shot_hyperparams is not None and model_name not in {FEW_SHOT_CNN_MODEL_NAME, "all"}:
+        raise ValueError("--few-shot-hyperparams is only supported when --model is few_shot_cnn or all")
     if bool(class_weight_loss) and bool(rank_label_weight_loss):
         raise ValueError("--class-weight-loss and --rank-label-weight-loss are mutually exclusive")
     task_spec = _resolve_supervised_task_spec(
@@ -3361,6 +3366,8 @@ def _prepare_supervised_run(
     cnn_hyperparams_info: dict[str, Any] | None = None
     resolved_autoencoder_hyperparam_axes: dict[str, list[Any]] | None = None
     autoencoder_hyperparams_info: dict[str, Any] | None = None
+    resolved_few_shot_hyperparam_axes: dict[str, list[Any]] | None = None
+    few_shot_hyperparams_info: dict[str, Any] | None = None
     if cnn_model_selected:
         resolved_cnn_hyperparam_axes, cnn_hyperparams_info = resolve_cnn_hyperparams(cnn_hyperparams)
     elif cnn_hyperparams is not None:
@@ -3375,6 +3382,16 @@ def _prepare_supervised_run(
     elif autoencoder_hyperparams is not None:
         extractor_warnings.append(
             "Ignored --autoencoder-hyperparams because no autoencoder_knn model is selected for this supervised run"
+        )
+
+    few_shot_model_selected = any(name == FEW_SHOT_CNN_MODEL_NAME for name in model_names)
+    if few_shot_model_selected:
+        resolved_few_shot_hyperparam_axes, few_shot_hyperparams_info = resolve_few_shot_hyperparams(
+            few_shot_hyperparams
+        )
+    elif few_shot_hyperparams is not None:
+        extractor_warnings.append(
+            "Ignored --few-shot-hyperparams because no few_shot_cnn model is selected for this supervised run"
         )
 
     labels_values, labels_known, labels_raw = _labels_from_items(
@@ -3532,6 +3549,9 @@ def _prepare_supervised_run(
             ),
             autoencoder_hyperparams=(
                 resolved_autoencoder_hyperparam_axes if selected_model == "autoencoder_knn" else None
+            ),
+            few_shot_hyperparams=(
+                resolved_few_shot_hyperparam_axes if selected_model == FEW_SHOT_CNN_MODEL_NAME else None
             ),
         )
         for params in model_candidate_params:
@@ -3736,6 +3756,7 @@ def _prepare_supervised_run(
             "cv_stratification": cv_stratification_summary,
             "cnn_hyperparams": cnn_hyperparams_info,
             "autoencoder_hyperparams": autoencoder_hyperparams_info,
+            "few_shot_hyperparams": few_shot_hyperparams_info,
             "cv_splits": cv_splits,
             "cv_split_groups": cv_split_groups,
             "tasks": tasks,
@@ -4071,7 +4092,11 @@ def _completed_supervised_result(run_dir: Path) -> dict[str, Any]:
     return {
         "run_dir": str(run_dir),
         "report": str(artifact_index.get("report")),
-        "train_scores_csv": str(artifact_index.get("train_scores_csv")),
+        "train_scores_csv": (
+            str(artifact_index.get("train_scores_csv"))
+            if artifact_index.get("train_scores_csv")
+            else None
+        ),
         "inference_scores_csv": (
             str(artifact_index.get("inference_scores_csv"))
             if artifact_index.get("inference_scores_csv")
@@ -4188,22 +4213,32 @@ def _prepare_supervised_finalize(
         )
     else:
         model.fit(x_train, y_train)
-    train_outputs = _predict_task_outputs(model, x_train, task_spec=task_spec)
-    train_scores = np.asarray(train_outputs.backdoor_scores, dtype=np.float64)
-    open_set_unknown_config = _build_open_set_unknown_attack_config(
-        train_labels=y_train,
-        train_outputs=train_outputs,
-        task_spec=task_spec,
+    knn_enabled = not (
+        winner_backend == "autoencoder_knn"
+        and not bool(getattr(model, "knn_enabled_", True))
     )
-    train_open_set_result = _apply_open_set_unknown_attack_rule(
-        outputs=train_outputs,
-        task_spec=task_spec,
-        config=open_set_unknown_config,
-    )
-    threshold_specs = _build_threshold_specs(
-        train_scores=train_scores,
-        percentiles=[float(x) for x in score_percentiles],
-    )
+    train_outputs: SupervisedPredictionOutputs | None = None
+    train_scores: np.ndarray | None = None
+    open_set_unknown_config: dict[str, Any] | None = None
+    train_open_set_result: dict[str, np.ndarray] | None = None
+    threshold_specs: list[dict[str, Any]] = []
+    if knn_enabled:
+        train_outputs = _predict_task_outputs(model, x_train, task_spec=task_spec)
+        train_scores = np.asarray(train_outputs.backdoor_scores, dtype=np.float64)
+        open_set_unknown_config = _build_open_set_unknown_attack_config(
+            train_labels=y_train,
+            train_outputs=train_outputs,
+            task_spec=task_spec,
+        )
+        train_open_set_result = _apply_open_set_unknown_attack_rule(
+            outputs=train_outputs,
+            task_spec=task_spec,
+            config=open_set_unknown_config,
+        )
+        threshold_specs = _build_threshold_specs(
+            train_scores=train_scores,
+            percentiles=[float(x) for x in score_percentiles],
+        )
 
     model_path = ctx.models_dir / (
         "best_model.pt" 
@@ -4225,23 +4260,40 @@ def _prepare_supervised_finalize(
     train_task_labels_raw = [int(x) for x in y_train.tolist()]
     train_labels_raw = _project_optional_labels_to_binary(train_task_labels_raw, task_spec=task_spec)
     train_binary_labels_np = task_spec.project_known_labels_to_binary(y_train)
-    train_scores_csv = ctx.reports_dir / "train_scores.csv"
-    save_score_csv(
-        output_path=train_scores_csv,
-        model_names=train_model_names,
-        labels=train_labels_raw,
-        scores=train_scores,
-        extra_rows=_multiclass_score_extra_rows(
-            task_labels=train_task_labels_raw,
-            outputs=train_outputs,
-            task_spec=task_spec,
-            open_set_result=train_open_set_result,
-        ),
-    )
+    train_scores_csv: Path | None = None
+    wrote_reconstruction_scores = False
+    if knn_enabled and train_scores is not None:
+        train_scores_csv = ctx.reports_dir / "train_scores.csv"
+        save_score_csv(
+            output_path=train_scores_csv,
+            model_names=train_model_names,
+            labels=train_labels_raw,
+            scores=train_scores,
+            extra_rows=_multiclass_score_extra_rows(
+                task_labels=train_task_labels_raw,
+                outputs=train_outputs,
+                task_spec=task_spec,
+                open_set_result=train_open_set_result,
+            ),
+        )
+    elif (
+        not knn_enabled
+        and isinstance(x_train, SupervisedFeatureBundle)
+        and hasattr(model, "reconstruction_losses")
+    ):
+        reconstruction_scores = model.reconstruction_losses(x_train)
+        train_scores_csv = ctx.reports_dir / "train_scores.csv"
+        save_score_csv(
+            output_path=train_scores_csv,
+            model_names=train_model_names,
+            labels=train_labels_raw,
+            scores=reconstruction_scores,
+        )
+        wrote_reconstruction_scores = True
 
     # If model is autoencoder and we are running with no_train (pretrained frozen),
-    # save per-sample reconstruction loss for the training set in the same order
-    # as `train_scores.csv` so they can be aligned easily.
+    # save per-sample reconstruction loss for the training set so it can be aligned
+    # with `train_scores.csv` when available.
     if (
         winner_backend in ("cnn", "autoencoder_knn")
         and isinstance(x_train, SupervisedFeatureBundle)
@@ -4271,16 +4323,8 @@ def _prepare_supervised_finalize(
     calibration_outputs: SupervisedPredictionOutputs | None = None
     calibration_open_set_result: dict[str, np.ndarray] | None = None
     calibration_binary_labels_np: np.ndarray | None = None
-    if calibration_indices.size > 0:
-        x_calibration = _slice_supervised_features(features, calibration_indices)
+    if calibration_indices.size > 0 and calibration_scores is not None:
         y_calibration = labels_value[calibration_indices]
-        calibration_outputs = _predict_task_outputs(model, x_calibration, task_spec=task_spec)
-        calibration_open_set_result = _apply_open_set_unknown_attack_rule(
-            outputs=calibration_outputs,
-            task_spec=task_spec,
-            config=open_set_unknown_config,
-        )
-        calibration_scores = np.asarray(calibration_outputs.backdoor_scores, dtype=np.float64)
         calibration_model_names = [model_names[int(i)] for i in calibration_indices.tolist()]
         calibration_task_labels_raw = [int(x) for x in y_calibration.tolist()]
         calibration_labels_raw = _project_optional_labels_to_binary(
@@ -4288,24 +4332,33 @@ def _prepare_supervised_finalize(
             task_spec=task_spec,
         )
         calibration_binary_labels_np = task_spec.project_known_labels_to_binary(y_calibration)
-        calibration_scores_csv = ctx.reports_dir / "calibration_scores.csv"
-        save_score_csv(
-            output_path=calibration_scores_csv,
-            model_names=calibration_model_names,
-            labels=calibration_labels_raw,
-            scores=calibration_scores,
-            extra_rows=_multiclass_score_extra_rows(
-                task_labels=calibration_task_labels_raw,
+        if knn_enabled:
+            x_calibration = _slice_supervised_features(features, calibration_indices)
+            calibration_outputs = _predict_task_outputs(model, x_calibration, task_spec=task_spec)
+            calibration_open_set_result = _apply_open_set_unknown_attack_rule(
                 outputs=calibration_outputs,
                 task_spec=task_spec,
-                open_set_result=calibration_open_set_result,
-            ),
-        )
-        calibration_score_summary = summarize_scores(calibration_scores)
-        calibration_offline_metrics = compute_offline_metrics(
-            calibration_binary_labels_np,
-            calibration_scores,
-        )
+                config=open_set_unknown_config,
+            )
+            calibration_scores = np.asarray(calibration_outputs.backdoor_scores, dtype=np.float64)
+            calibration_scores_csv = ctx.reports_dir / "calibration_scores.csv"
+            save_score_csv(
+                output_path=calibration_scores_csv,
+                model_names=calibration_model_names,
+                labels=calibration_labels_raw,
+                scores=calibration_scores,
+                extra_rows=_multiclass_score_extra_rows(
+                    task_labels=calibration_task_labels_raw,
+                    outputs=calibration_outputs,
+                    task_spec=task_spec,
+                    open_set_result=calibration_open_set_result,
+                ),
+            )
+            calibration_score_summary = summarize_scores(calibration_scores)
+            calibration_offline_metrics = compute_offline_metrics(
+                calibration_binary_labels_np,
+                calibration_scores,
+            )
 
     infer_scores_csv: Path | None = None
     inference_summary: dict[str, Any] | None = None
@@ -4325,13 +4378,6 @@ def _prepare_supervised_finalize(
 
     if infer_indices.size > 0:
         x_infer = _slice_supervised_features(features, infer_indices)
-        infer_outputs = _predict_task_outputs(model, x_infer, task_spec=task_spec)
-        infer_open_set_result = _apply_open_set_unknown_attack_rule(
-            outputs=infer_outputs,
-            task_spec=task_spec,
-            config=open_set_unknown_config,
-        )
-        infer_scores = np.asarray(infer_outputs.backdoor_scores, dtype=np.float64)
         infer_model_names = [model_names[int(i)] for i in infer_indices.tolist()]
         infer_sample_identities = [all_sample_identities[int(i)] for i in infer_indices.tolist()]
 
@@ -4350,22 +4396,42 @@ def _prepare_supervised_finalize(
         if bool(np.all(infer_known_mask)):
             infer_task_labels_np = np.asarray([int(x) for x in infer_task_labels_raw], dtype=np.int32)
             infer_labels_np = task_spec.project_known_labels_to_binary(infer_task_labels_np)
-
-        infer_scores_csv = ctx.reports_dir / "inference_scores.csv"
-        save_score_csv(
-            output_path=infer_scores_csv,
-            model_names=infer_model_names,
-            labels=infer_labels_raw,
-            scores=infer_scores,
-            extra_rows=_multiclass_score_extra_rows(
-                task_labels=infer_task_labels_raw,
+        if knn_enabled:
+            infer_outputs = _predict_task_outputs(model, x_infer, task_spec=task_spec)
+            infer_open_set_result = _apply_open_set_unknown_attack_rule(
                 outputs=infer_outputs,
                 task_spec=task_spec,
-                open_set_result=infer_open_set_result,
-            ),
-        )
+                config=open_set_unknown_config,
+            )
+            infer_scores = np.asarray(infer_outputs.backdoor_scores, dtype=np.float64)
+            infer_scores_csv = ctx.reports_dir / "inference_scores.csv"
+            save_score_csv(
+                output_path=infer_scores_csv,
+                model_names=infer_model_names,
+                labels=infer_labels_raw,
+                scores=infer_scores,
+                extra_rows=_multiclass_score_extra_rows(
+                    task_labels=infer_task_labels_raw,
+                    outputs=infer_outputs,
+                    task_spec=task_spec,
+                    open_set_result=infer_open_set_result,
+                ),
+            )
+        elif (
+            isinstance(x_infer, SupervisedFeatureBundle)
+            and hasattr(model, "reconstruction_losses")
+        ):
+            reconstruction_scores = model.reconstruction_losses(x_infer)
+            infer_scores_csv = ctx.reports_dir / "inference_scores.csv"
+            save_score_csv(
+                output_path=infer_scores_csv,
+                model_names=infer_model_names,
+                labels=infer_labels_raw,
+                scores=reconstruction_scores,
+            )
+            wrote_reconstruction_scores = True
 
-        # Save per-sample reconstruction loss for inference set (same order as inference_scores.csv)
+        # Save per-sample reconstruction loss for inference set (same order as inference_scores.csv when present)
         if (
             winner_backend in ("cnn", "autoencoder_knn")
             and isinstance(x_infer, SupervisedFeatureBundle)
@@ -4385,22 +4451,23 @@ def _prepare_supervised_finalize(
             infer_features_path = ctx.reports_dir / "inference_features.npy"
             np.save(infer_features_path, infer_features)
 
-        threshold_rows = compute_infer_threshold_rows(
-            train_scores=train_scores,
-            infer_scores=infer_scores,
-            percentiles=[float(x) for x in score_percentiles],
-            infer_labels=infer_labels_np,
-        )
-        threshold_rows_from_inference = compute_infer_threshold_rows_from_inference(
-            infer_scores=infer_scores,
-            percentiles=[float(x) for x in score_percentiles],
-            infer_labels=infer_labels_np,
-        )
-        infer_offline_metrics = compute_offline_metrics(
-            infer_labels_np,
-            infer_scores,
-        )
-        inference_summary = summarize_scores(infer_scores)
+        if knn_enabled and infer_scores is not None:
+            threshold_rows = compute_infer_threshold_rows(
+                train_scores=train_scores,
+                infer_scores=infer_scores,
+                percentiles=[float(x) for x in score_percentiles],
+                infer_labels=infer_labels_np,
+            )
+            threshold_rows_from_inference = compute_infer_threshold_rows_from_inference(
+                infer_scores=infer_scores,
+                percentiles=[float(x) for x in score_percentiles],
+                infer_labels=infer_labels_np,
+            )
+            infer_offline_metrics = compute_offline_metrics(
+                infer_labels_np,
+                infer_scores,
+            )
+            inference_summary = summarize_scores(infer_scores)
 
     threshold_selection_cfg = manifest.get("threshold_selection", {})
     selected_threshold_summary: dict[str, Any] | None = None
@@ -4449,10 +4516,12 @@ def _prepare_supervised_finalize(
             json.dump(json_ready(selected_threshold_summary), f, indent=2)
 
     selected_threshold_specs = _build_selected_threshold_specs(selected_threshold_summary)
-    train_offline_metrics = compute_offline_metrics(
-        train_binary_labels_np,
-        train_scores,
-    )
+    train_offline_metrics: dict[str, Any] | None = None
+    if train_scores is not None:
+        train_offline_metrics = compute_offline_metrics(
+            train_binary_labels_np,
+            train_scores,
+        )
     open_set_assessment = None
     if open_set_unknown_config is not None:
         open_set_assessment = {
@@ -4501,7 +4570,7 @@ def _prepare_supervised_finalize(
             ),
         }
     multiclass_assessment = None
-    if not task_spec.is_binary:
+    if train_outputs is not None and not task_spec.is_binary:
         multiclass_assessment = {
             "train": _summarize_multiclass_partition(
                 labels_true=np.asarray(y_train, dtype=np.int32),
@@ -4538,26 +4607,28 @@ def _prepare_supervised_finalize(
                 else None
             ),
         }
-    attack_analysis = {
-        "train": _summarize_attack_groups(
-            sample_identities=train_sample_identities,
-            labels=train_labels_raw,
-            scores=train_scores,
-            threshold_specs=threshold_specs,
-            selected_threshold_specs=selected_threshold_specs,
-        ),
-        "inference": (
-            _summarize_attack_groups(
-                sample_identities=infer_sample_identities,
-                labels=infer_labels_raw,
-                scores=np.asarray(infer_scores, dtype=np.float64),
+    attack_analysis = None
+    if train_scores is not None:
+        attack_analysis = {
+            "train": _summarize_attack_groups(
+                sample_identities=train_sample_identities,
+                labels=train_labels_raw,
+                scores=train_scores,
                 threshold_specs=threshold_specs,
                 selected_threshold_specs=selected_threshold_specs,
-            )
-            if infer_scores is not None
-            else None
-        ),
-    }
+            ),
+            "inference": (
+                _summarize_attack_groups(
+                    sample_identities=infer_sample_identities,
+                    labels=infer_labels_raw,
+                    scores=np.asarray(infer_scores, dtype=np.float64),
+                    threshold_specs=threshold_specs,
+                    selected_threshold_specs=selected_threshold_specs,
+                )
+                if infer_scores is not None
+                else None
+            ),
+        }
 
     export_train_features_path: Path | None = None
     export_train_labels_path: Path | None = None
@@ -4567,6 +4638,16 @@ def _prepare_supervised_finalize(
         task_spec=task_spec,
     )
     report_warnings = [str(x) for x in manifest.get("warnings", [])]
+    if not knn_enabled:
+        if wrote_reconstruction_scores:
+            report_warnings.append(
+                "Autoencoder knn disabled; wrote scores from reconstruction loss and skipped "
+                "threshold selection."
+            )
+        else:
+            report_warnings.append(
+                "Autoencoder knn disabled; skipped score generation and threshold selection."
+            )
     if winner_feature_weights_mode == "unsupported_for_task_mode":
         report_warnings.append(
             "Skipped winner feature-importance export because multiclass supervised task mode does not "
@@ -4657,7 +4738,9 @@ def _prepare_supervised_finalize(
                 else "backdoor_score"
             ),
             "binary_projection": str(task_spec.binary_projection),
-            "train_score_summary": summarize_scores(train_scores),
+            "train_score_summary": (
+                summarize_scores(train_scores) if train_scores is not None else None
+            ),
             "train_offline_metrics": train_offline_metrics,
             "calibration_score_summary": calibration_score_summary,
             "calibration_offline_metrics": calibration_offline_metrics,
@@ -4733,7 +4816,7 @@ def _prepare_supervised_finalize(
     }
     artifacts = {
         "best_model": str(model_path),
-        "train_scores_csv": str(train_scores_csv),
+        "train_scores_csv": str(train_scores_csv) if train_scores_csv is not None else None,
         "calibration_scores_csv": str(calibration_scores_csv) if calibration_scores_csv is not None else None,
         "inference_scores_csv": str(infer_scores_csv) if infer_scores_csv is not None else None,
         "selected_threshold": str(selected_threshold_path) if selected_threshold_path is not None else None,
@@ -4755,7 +4838,7 @@ def _prepare_supervised_finalize(
     return {
         "run_dir": str(run_dir),
         "report": str(report_path),
-        "train_scores_csv": str(train_scores_csv),
+        "train_scores_csv": str(train_scores_csv) if train_scores_csv is not None else None,
         "calibration_scores_csv": str(calibration_scores_csv) if calibration_scores_csv is not None else None,
         "inference_scores_csv": str(infer_scores_csv) if infer_scores_csv is not None else None,
         "best_model": str(model_path),
@@ -4801,7 +4884,11 @@ def _complete_supervised_finalize(
     return {
         "run_dir": str(run_dir),
         "report": str(base_artifacts.get("report")),
-        "train_scores_csv": str(base_artifacts.get("train_scores_csv")),
+        "train_scores_csv": (
+            str(base_artifacts.get("train_scores_csv"))
+            if base_artifacts.get("train_scores_csv")
+            else None
+        ),
         "inference_scores_csv": (
             str(base_artifacts.get("inference_scores_csv"))
             if base_artifacts.get("inference_scores_csv")
@@ -4966,6 +5053,7 @@ def run_supervised_pipeline(
     multiclass_attack_names: list[str] | None = None,
     cnn_hyperparams: Path | None = None,
     autoencoder_hyperparams: Path | None = None,
+    few_shot_hyperparams: Path | None = None,
     dann_source_rank: int = DANN_DEFAULT_SOURCE_RANK,
     dann_target_adaptation_percent: int = DANN_DEFAULT_TARGET_ADAPTATION_PERCENT,
     dann_lambda_max: float = DANN_DEFAULT_LAMBDA_MAX,
@@ -5029,6 +5117,7 @@ def run_supervised_pipeline(
             multiclass_attack_names=multiclass_attack_names,
             cnn_hyperparams=cnn_hyperparams,
             autoencoder_hyperparams=autoencoder_hyperparams,
+            few_shot_hyperparams=few_shot_hyperparams,
             dann_source_rank=int(dann_source_rank),
             dann_target_adaptation_percent=int(dann_target_adaptation_percent),
             dann_lambda_max=float(dann_lambda_max),
@@ -5107,6 +5196,7 @@ def run_supervised_pipeline(
         multiclass_attack_names=multiclass_attack_names,
         cnn_hyperparams=cnn_hyperparams,
         autoencoder_hyperparams=autoencoder_hyperparams,
+        few_shot_hyperparams=few_shot_hyperparams,
         dann_source_rank=int(dann_source_rank),
         dann_target_adaptation_percent=int(dann_target_adaptation_percent),
         dann_lambda_max=float(dann_lambda_max),

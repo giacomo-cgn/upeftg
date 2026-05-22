@@ -1,5 +1,5 @@
 {
-  "conv_channels": [32],
+  "conv_channels": [64],
   "num_conv_layers": [2],
   "kernel_size": [5],
   "n_neighbors": [5],

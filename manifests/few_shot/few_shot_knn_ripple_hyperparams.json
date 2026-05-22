@@ -1,0 +1,5 @@
+{
+  "pretrained_checkpoint": ["/home/giacomo/Desktop/peft_attacks/loo_checkpoint/loo_RIPPLE_best_model.pt"],
+  "k_knn": [5],
+  "n_few_shot_per_class": [5]
+}

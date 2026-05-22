@@ -213,6 +213,8 @@ class AutoencoderKNNSupervisedModel:
     The model first trains an autoencoder unsupervised on the feature data,
     then uses the encoder to extract features, and finally trains a KNN classifier
     on top of the extracted features.
+
+    When knn is disabled, the model skips KNN training and only exposes encoder features.
     """
 
     def __init__(
@@ -224,6 +226,7 @@ class AutoencoderKNNSupervisedModel:
         stride: int = 1,
         dilation: int = 1,
         n_neighbors: int = 5,
+        knn: bool = True,
         dropout: float = 0.1,
         use_residual: bool = True,
         normalization: str = "layernorm",
@@ -245,6 +248,8 @@ class AutoencoderKNNSupervisedModel:
     ) -> None:
         _require_torch()
 
+        knn_enabled = bool(knn)
+
         if int(conv_channels) <= 0:
             raise ValueError("autoencoder_knn conv_channels must be positive")
         if int(num_conv_layers) <= 0:
@@ -257,7 +262,7 @@ class AutoencoderKNNSupervisedModel:
             raise ValueError("autoencoder_knn dilation must be positive")
         if int(stride) != 1:
             raise ValueError("autoencoder_knn currently requires stride=1 to preserve reconstruction length")
-        if n_neighbors <= 0:
+        if knn_enabled and n_neighbors <= 0:
             raise ValueError("autoencoder_knn n_neighbors must be positive")
         if not 0.0 <= float(dropout) < 1.0:
             raise ValueError("autoencoder_knn dropout must be in [0, 1)")
@@ -287,6 +292,7 @@ class AutoencoderKNNSupervisedModel:
         self.stride = int(stride)
         self.dilation = int(dilation)
         self.n_neighbors = int(n_neighbors)
+        self.knn_enabled_ = bool(knn_enabled)
         self.dropout = float(dropout)
         self.use_residual = bool(use_residual)
         self.normalization = str(normalization)
@@ -630,11 +636,14 @@ class AutoencoderKNNSupervisedModel:
         # ============================================================
         # Phase 3: Train KNN classifier on extracted features
         # ============================================================
-        self.knn_classifier_ = KNeighborsClassifier(
-            n_neighbors=self.n_neighbors,
-            n_jobs=n_jobs,
-        )
-        self.knn_classifier_.fit(train_features, y_train)
+        if self.knn_enabled_:
+            self.knn_classifier_ = KNeighborsClassifier(
+                n_neighbors=self.n_neighbors,
+                n_jobs=n_jobs,
+            )
+            self.knn_classifier_.fit(train_features, y_train)
+        else:
+            self.knn_classifier_ = None
         
         self._fit_summary = {
             "best_epoch": int(best_epoch),
@@ -645,6 +654,8 @@ class AutoencoderKNNSupervisedModel:
             "feature_dim": int(self.feature_dim_ or 0),
             "conv_channels": int(self.conv_channels),
             "n_neighbors": int(self.n_neighbors),
+            "knn_enabled": bool(self.knn_enabled_),
+            "knn_trained": bool(self.knn_classifier_ is not None),
             "class_weight_loss": bool(self.class_weight_loss),
             "rank_label_weight_loss": bool(self.rank_label_weight_loss),
             "training_mode": "pretrained_frozen"
@@ -659,6 +670,8 @@ class AutoencoderKNNSupervisedModel:
         """Get decision scores for binary classification."""
         _require_torch()
         assert torch is not None
+        if not self.knn_enabled_:
+            raise RuntimeError("autoencoder_knn knn is disabled; use extract_features instead")
         if self.knn_classifier_ is None:
             raise RuntimeError("autoencoder_knn model has not been fit")
         
@@ -707,6 +720,8 @@ class AutoencoderKNNSupervisedModel:
 
     def predict_proba(self, bundle: SupervisedFeatureBundle) -> np.ndarray:
         """Get class probabilities."""
+        if not self.knn_enabled_:
+            raise RuntimeError("autoencoder_knn knn is disabled; use extract_features instead")
         tensors = self._prepare_numpy_inputs(bundle)
         dataset = TensorDataset(
             torch.from_numpy(tensors.inputs),
@@ -727,6 +742,8 @@ class AutoencoderKNNSupervisedModel:
 
     def predict(self, bundle: SupervisedFeatureBundle) -> np.ndarray:
         """Get predicted class labels."""
+        if not self.knn_enabled_:
+            raise RuntimeError("autoencoder_knn knn is disabled; use extract_features instead")
         if self.knn_classifier_ is None:
             raise RuntimeError("autoencoder_knn model has not been fit")
         
@@ -773,7 +790,7 @@ class AutoencoderKNNSupervisedModel:
                 batch_inputs = self._move_batch_to_device(batch_inputs)
                 layer_mask_device = batch_layer_mask.to(self.device_)
                 reconstructed, _ = self.autoencoder_(batch_inputs, layer_mask_device)
-                valid_mask = batch_layer_mask.unsqueeze(-1).to(dtype=batch_inputs.dtype)
+                valid_mask = layer_mask_device.unsqueeze(-1).to(dtype=batch_inputs.dtype)
                 squared_error = torch.square(reconstructed - batch_inputs) * valid_mask
                 per_sample_sum = torch.sum(squared_error, dim=(1, 2))
                 per_sample_count = torch.clamp(torch.sum(valid_mask, dim=(1, 2)), min=1.0)
@@ -817,12 +834,13 @@ class AutoencoderKNNSupervisedModel:
         assert torch is not None
         if (
             self.autoencoder_ is None
-            or self.knn_classifier_ is None
             or self.channel_mean_ is None
             or self.channel_std_ is None
             or self.channel_layout_ is None
         ):
             raise RuntimeError("autoencoder_knn model has not been fit")
+        if self.knn_enabled_ and self.knn_classifier_ is None:
+            raise RuntimeError("autoencoder_knn knn is enabled but classifier is missing")
         
         payload = {
             "backend": self.backend_name_,
@@ -833,6 +851,7 @@ class AutoencoderKNNSupervisedModel:
                 "stride": int(self.stride),
                 "dilation": int(self.dilation),
                 "n_neighbors": int(self.n_neighbors),
+                "knn": bool(self.knn_enabled_),
                 "dropout": float(self.dropout),
                 "use_residual": bool(self.use_residual),
                 "normalization": str(self.normalization),
@@ -902,6 +921,7 @@ def load_autoencoder_knn_checkpoint(
         stride=int(config.get("stride", 1)),
         dilation=int(config.get("dilation", 1)),
         n_neighbors=int(config["n_neighbors"]),
+        knn=bool(config.get("knn", True)),
         dropout=float(config.get("dropout", 0.1)),
         use_residual=bool(config.get("use_residual", True)),
         normalization=str(config.get("normalization", "layernorm")),
@@ -958,7 +978,7 @@ def load_autoencoder_knn_checkpoint(
     
     # Load KNN classifier
     model.knn_classifier_ = payload.get("knn_classifier")
-    if model.knn_classifier_ is None:
+    if model.knn_enabled_ and model.knn_classifier_ is None:
         raise ValueError("autoencoder_knn checkpoint is missing knn_classifier")
 
     return model

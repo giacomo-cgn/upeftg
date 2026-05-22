@@ -26,8 +26,8 @@ DRY_RUN=${DRY_RUN:-0}
 CLASS_WEIGHT_LOSS=${CLASS_WEIGHT_LOSS:-0}
 RANK_LABEL_WEIGHT_LOSS=${RANK_LABEL_WEIGHT_LOSS:-0}
 
-RUN_ID=${RUN_ID:-autoenceder_pretr_clean_imdb_ripple}
-MANIFEST_JSON=${MANIFEST_JSON:-${REPO_ROOT}/manifests/single_datasets/llama2_7b_imdb_ripple.json}
+RUN_ID=${RUN_ID:-autoenceder_pretr_toxic_alpaca}
+MANIFEST_JSON=${MANIFEST_JSON:-${REPO_ROOT}/manifests/single_datasets/llama2_7b_toxic_backdoors_alpaca.json}
 FEATURE_FILE=${FEATURE_FILE:-${REPO_ROOT}/runs/feature_extract/list2_features-merged-cnn/merged/spectral_features.npy}
 AUTOENCODER_HYPERPARAMS=${AUTOENCODER_HYPERPARAMS:-${REPO_ROOT}/manifests/selfsupervised_hyperparams/autoencoder_pretrained_hyperparams.json}
 FEATURES=(
