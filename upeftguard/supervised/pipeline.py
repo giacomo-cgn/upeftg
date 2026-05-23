@@ -4323,7 +4323,7 @@ def _prepare_supervised_finalize(
     calibration_outputs: SupervisedPredictionOutputs | None = None
     calibration_open_set_result: dict[str, np.ndarray] | None = None
     calibration_binary_labels_np: np.ndarray | None = None
-    if calibration_indices.size > 0 and calibration_scores is not None:
+    if calibration_indices.size > 0:
         y_calibration = labels_value[calibration_indices]
         calibration_model_names = [model_names[int(i)] for i in calibration_indices.tolist()]
         calibration_task_labels_raw = [int(x) for x in y_calibration.tolist()]
@@ -4332,8 +4332,8 @@ def _prepare_supervised_finalize(
             task_spec=task_spec,
         )
         calibration_binary_labels_np = task_spec.project_known_labels_to_binary(y_calibration)
+        x_calibration = _slice_supervised_features(features, calibration_indices)
         if knn_enabled:
-            x_calibration = _slice_supervised_features(features, calibration_indices)
             calibration_outputs = _predict_task_outputs(model, x_calibration, task_spec=task_spec)
             calibration_open_set_result = _apply_open_set_unknown_attack_rule(
                 outputs=calibration_outputs,
@@ -4354,6 +4354,20 @@ def _prepare_supervised_finalize(
                     open_set_result=calibration_open_set_result,
                 ),
             )
+        elif (
+            isinstance(x_calibration, SupervisedFeatureBundle)
+            and hasattr(model, "reconstruction_losses")
+        ):
+            calibration_scores = model.reconstruction_losses(x_calibration)
+            calibration_scores_csv = ctx.reports_dir / "calibration_scores.csv"
+            save_score_csv(
+                output_path=calibration_scores_csv,
+                model_names=calibration_model_names,
+                labels=calibration_labels_raw,
+                scores=calibration_scores,
+            )
+
+        if calibration_scores is not None:
             calibration_score_summary = summarize_scores(calibration_scores)
             calibration_offline_metrics = compute_offline_metrics(
                 calibration_binary_labels_np,
@@ -4472,7 +4486,7 @@ def _prepare_supervised_finalize(
     threshold_selection_cfg = manifest.get("threshold_selection", {})
     selected_threshold_summary: dict[str, Any] | None = None
     selected_threshold_path: Path | None = None
-    if calibration_indices.size > 0:
+    if calibration_indices.size > 0 and calibration_scores is not None:
         accepted_fpr_values = threshold_selection_cfg.get("accepted_fprs")
         if accepted_fpr_values is None:
             legacy_value = threshold_selection_cfg.get("accepted_fpr")
