@@ -5,7 +5,7 @@ __pycache__/
 # Local verification assets
 /feature_bundles
 /tests/
-/scripts/slurm_pipeline_smoke.py
+/scripts/
 /manifests/smoke/
 /manifests/transformer_hyperparams/transformer_smoke_*.json
 experiments.sh

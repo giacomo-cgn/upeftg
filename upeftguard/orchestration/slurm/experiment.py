@@ -198,6 +198,83 @@ def submit_checkpoint_inference(
     )
 
 
+def submit_grouped_explanation(
+    *,
+    run_dir: Path,
+    run_id: str,
+    checkpoint: Path,
+    feature_file: Path,
+    background_selection: Path,
+    explanation_selection: Path,
+    output_root: Path,
+    partition: str,
+    cpus_per_worker: str,
+    dependency: str | None,
+    dry_run: bool,
+    background_label: str,
+    background_max_samples: int | None,
+    explanation_max_samples: int | None,
+    random_state: int,
+    batch_size: int,
+    grouping: list[str] | tuple[str, ...] | None,
+    plot_max_display: int,
+    max_local_plots: int,
+) -> dict[str, Any]:
+    """Submit grouped SHAP as a compute job; the frontend only constructs argv."""
+
+    log_dir = Path(run_dir) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        sys.executable,
+        "-m",
+        "upeftguard.cli",
+        "run",
+        "explanation-worker",
+        "--checkpoint",
+        str(checkpoint),
+        "--feature-file",
+        str(feature_file),
+        "--background-selection",
+        str(background_selection),
+        "--explanation-selection",
+        str(explanation_selection),
+        "--output-root",
+        str(output_root),
+        "--output-run-dir",
+        str(run_dir),
+        "--run-id",
+        str(run_id),
+        "--background-label",
+        str(background_label),
+        "--random-state",
+        str(int(random_state)),
+        "--batch-size",
+        str(int(batch_size)),
+        "--plot-max-display",
+        str(int(plot_max_display)),
+        "--max-local-plots",
+        str(int(max_local_plots)),
+    ]
+    if grouping:
+        command.extend(["--grouping", *(str(value) for value in grouping)])
+    if background_max_samples is not None:
+        command.extend(["--background-max-samples", str(int(background_max_samples))])
+    if explanation_max_samples is not None:
+        command.extend(["--explanation-max-samples", str(int(explanation_max_samples))])
+    return run_sbatch_command(
+        command,
+        partition=partition,
+        dependency=dependency,
+        cpus_per_task=resolve_partition_cpus(partition, cpus_per_worker),
+        memory="32GB",
+        job_name=f"upeftguard_explanation_{run_id}",
+        output=log_dir / "explanation_%j.out",
+        error=log_dir / "explanation_%j.err",
+        chdir=project_root(),
+        dry_run=dry_run,
+    )
+
+
 def submit_supervised_training(
     *,
     run_dir: Path,

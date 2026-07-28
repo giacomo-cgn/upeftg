@@ -1,8 +1,0 @@
-{
-  "conv_channels": [192, 256, 320, 384],
-  "num_conv_layers": [3, 4, 5],
-  "kernel_size": [3, 5, 7],
-  "dropout": [0.0, 0.05],
-  "learning_rate": [0.00005, 0.0001],
-  "weight_decay": [0.0, 0.000001, 0.00001]
-}

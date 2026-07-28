@@ -1,0 +1,25 @@
+{
+  "path": [
+    {
+      "path": "llama2_7b_toxic_backdoors_hard_rank512_qv/llama2_7b_toxic_backdoors_hard_rank512_qv_label0_",
+      "indices": [
+        0,
+        1
+      ]
+    },
+    {
+      "path": "llama2_7b_toxic_backdoors_hard_rank512_qv/llama2_7b_toxic_backdoors_hard_rank512_qv_label0_",
+      "indices": [
+        3,
+        49
+      ]
+    },
+    {
+      "path": "llama2_7b_toxic_backdoors_hard_rank512_qv/llama2_7b_toxic_backdoors_hard_rank512_qv_label1_",
+      "indices": [
+        0,
+        49
+      ]
+    }
+  ]
+}

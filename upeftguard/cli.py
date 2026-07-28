@@ -11,6 +11,7 @@ from .commands.artifacts import (
 from .commands.experiment import (
     handle_aggregate,
     handle_extract,
+    handle_explain,
     handle_full,
     handle_infer,
     handle_train,
@@ -26,6 +27,7 @@ from .workflows import (
     run_checkpoint_inference,
     run_feature_aggregation,
     run_feature_extraction,
+    run_grouped_explanation,
     run_full_experiment,
     run_supervised_training,
 )
@@ -45,6 +47,10 @@ def _cmd_experiment_train(args: argparse.Namespace) -> int:
 
 def _cmd_experiment_infer(args: argparse.Namespace) -> int:
     return handle_infer(args, run_checkpoint_inference)
+
+
+def _cmd_experiment_explain(args: argparse.Namespace) -> int:
+    return handle_explain(args, run_grouped_explanation)
 
 
 def _cmd_experiment_full(args: argparse.Namespace) -> int:
@@ -70,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
             "aggregate": _cmd_experiment_aggregate,
             "train": _cmd_experiment_train,
             "infer": _cmd_experiment_infer,
+            "explain": _cmd_experiment_explain,
         },
     )
     register_internal_commands(

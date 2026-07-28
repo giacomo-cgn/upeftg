@@ -340,6 +340,26 @@ _REGISTRY: dict[str, ModelDefinition] = {
         ),
         supported_representation_kinds=TABULAR_REPRESENTATION_KINDS,
     ),
+    "lasso": ModelDefinition(
+        name="lasso",
+        backend="sklearn",
+        complexity_rank=1,
+        normalization_policy="standard_scaler",
+        normalization_factory=_standard_scaler,
+        param_grid=_grid(
+            C=[1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0],
+            class_weight=[None, "balanced"],
+        ),
+        estimator_factory=lambda params, random_state, task_spec: LogisticRegression(
+            C=float(params["C"]),
+            class_weight=params["class_weight"],
+            solver="saga",
+            l1_ratio=1.0,
+            max_iter=5000,
+            random_state=int(random_state),
+        ),
+        supported_representation_kinds=TABULAR_REPRESENTATION_KINDS,
+    ),
     "ridge_classifier": ModelDefinition(
         name="ridge_classifier",
         backend="sklearn",

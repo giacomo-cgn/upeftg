@@ -16,6 +16,7 @@ dependencies = [
   "safetensors",
   "scikit-learn",
   "scipy",
+  "shap>=0.46",
   "torch",
 ]
 
@@ -36,4 +37,3 @@ select = ["E4", "E7", "E9", "F"]
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
-

@@ -15,7 +15,7 @@ conda activate upeftg
 The public entry point is always:
 
 ```text
-python -m upeftguard.cli experiment <extract|aggregate|train|infer|full>
+python -m upeftguard.cli experiment <extract|aggregate|train|infer|explain|full>
 ```
 
 ## Command conventions
@@ -198,8 +198,10 @@ Intentionally omitted defaults:
 | `--multiclass-attack-names` | unset | Binary mode does not define attack classes. |
 
 Registered `--model` values are `adaboost`, `cnn_1d`, `cnn_1d_dann`,
-`kernel_svm`, `linear_svm`, `logistic_regression`, `random_forest`,
-`ridge_classifier`, and `transformer`.
+`kernel_svm`, `lasso`, `linear_svm`, `logistic_regression`, `random_forest`,
+`ridge_classifier`, and `transformer`. `lasso` is an L1-penalized logistic
+classifier, so it retains class probabilities while encouraging sparse feature
+coefficients.
 
 #### Model hyperparameters
 
@@ -212,7 +214,7 @@ CNN, DANN, and Transformer models require `--hyperparams`; they have no
 implicit grid. Classical models use their registered grid when the flag is
 omitted, or replace it with the supplied grid when the flag is present.
 
-Classical models (`adaboost`, `kernel_svm`, `linear_svm`,
+Classical models (`adaboost`, `kernel_svm`, `lasso`, `linear_svm`,
 `logistic_regression`, `random_forest`, and `ridge_classifier`) expand the
 built-in candidate grids registered in `upeftguard/supervised/models/registry.py`.
 The resolved grid and its source are recorded in the tuning manifest for
@@ -500,6 +502,60 @@ effective automatic behavior when calibration is enabled. Use
 `--no-split-by-folder` when a plain label-stratified calibration split is
 required instead.
 
+## Grouped linear SHAP explanations
+
+`experiment explain` submits a Slurm job; it does not load the checkpoint or
+raw feature matrix on the frontend node. It currently accepts a binary
+`logistic_regression` checkpoint with `input_normalization.mode=none` and a
+raw 2D spectral bundle compatible with that checkpoint.
+
+```bash
+python -m upeftguard.cli experiment explain \
+  --checkpoint runs/<TRAIN_RUN>/training/models/best_model.joblib \
+  --feature-file feature_bundles/raw_feature_bundle/spectral_features.npy \
+  --background-selection runs/<TRAIN_RUN>/training/reports/predictions/train.csv \
+  --explanation-selection runs/<INFER_RUN>/inference/reports/predictions/inference.csv \
+  --background-label all \
+  --grouping layer+feature \
+  --random-state 42 \
+  --partition extra \
+  --cpus-per-worker 4 \
+  --output-root runs \
+  --run-id <EXPLANATION_RUN>
+```
+
+The two selection files may be prediction CSVs containing `model_name`, or
+JSON model-name lists, and must be non-overlapping. By default every eligible
+background and explanation row is used. `--background-max-samples` and
+`--explanation-max-samples` enable deterministic stratified sampling.
+
+SHAP is computed once in the fitted logistic model's log-odds coordinates.
+The raw column attributions are then summed into every strategy requested by
+`--grouping`. Available axes are `feature`, `layer`, `block`, and `head`;
+combine them with `+`, for example `layer+feature` or `block+head`. Pass
+`--grouping all` for all 15 non-empty combinations. The default is
+`layer+feature`. The `feature` axis keeps `sv_1` through `sv_k` separate.
+
+Each strategy writes below `reports/groupings/<STRATEGY>/`, including
+`grouped_shap_values.npz`, `global_importance_all.csv`,
+`global_importance_clean.csv`, `global_importance_backdoor.csv`, and one
+`global_importance_attack_<ATTACK>.csv` per positive-label attack.
+
+The same compute job writes PNG plots inside each strategy directory:
+
+- global SHAP bars and beeswarms for every non-empty cohort;
+- Cartesian importance and signed-difference heatmaps for two-axis strategies;
+- a SHAP sample heatmap and a cohort-importance comparison;
+- a SHAP group-difference plot when both binary cohorts contain enough rows;
+- a probability-space decision plot and up to 20 representative local
+  waterfalls for one- and two-axis strategies.
+
+Three- and four-axis strategies produce condensed bar and beeswarm plots only.
+
+`--plot-max-display` controls the number of groups shown by condensed SHAP
+plots. `--max-local-plots` bounds the waterfall count; set it to `0` to disable
+local plots while retaining all global plots.
+
 ## Flag availability and defaults
 
 This matrix is a compact completeness check against the public parsers.
@@ -508,7 +564,7 @@ be omitted to retain the default.
 
 | Flag | Commands | Default / requirement |
 | --- | --- | --- |
-| `--backend` | all | `slurm` (`slurm`, `local`) |
+| `--backend` | extract, aggregate, train, infer, full | `slurm` (`slurm`, `local`) |
 | `--partition` | all | `extra` |
 | `--cpus-per-worker` | all | `4` |
 | `--dry-run` | all | off |
@@ -516,8 +572,15 @@ be omitted to retain the default.
 | `--dataset-root` | extract, train, full | environment-derived path described above |
 | `--output-root` | all | `runs` |
 | `--run-id` | all | unset; generated UTC identifier |
-| `--feature-file` | aggregate, train, infer | required |
-| `--checkpoint` | infer | required |
+| `--feature-file` | aggregate, train, infer, explain | required |
+| `--checkpoint` | infer, explain | required |
+| `--background-selection`, `--explanation-selection` | explain | required; paths must select disjoint model names |
+| `--background-label` | explain | `all` (`all`, `clean`, `backdoor`) |
+| `--background-max-samples`, `--explanation-max-samples` | explain | unset; all eligible rows |
+| `--batch-size` | explain | `128` |
+| `--grouping` | explain | `layer+feature`; axes may be combined with `+`, or use `all` |
+| `--plot-max-display` | explain | `20` |
+| `--max-local-plots` | explain | `20`; `0` disables local waterfalls |
 | `--output-filename` | aggregate | unset; stage default path |
 | `--feature-root` | aggregate | unset; stage feature directory |
 | `--train-manifest-json`, `--infer-manifest-json` | full | unset; both required in explicit-partition form |
@@ -543,7 +606,7 @@ be omitted to retain the default.
 | `--input-normalization` | train, full | `none` (`none`, `dataset_feature_standard`) |
 | `--cv-derived-refit-epochs` | train, full | off |
 | `--no-refit` | train, full | off; forces CV and cannot be combined with refit-epoch or interval-checkpoint options |
-| `--random-state` | train, full | `42` |
+| `--random-state` | train, explain, full | `42` |
 | `--train-split` / `--train_split` | train, full | unset; full requires it with `--manifest-json` |
 | `--calibration-split` / `--calibration_split` | train, full | unset |
 | `--accepted-fpr` / `--accepted_fpr` | train, full | unset; one or more floats in `[0, 1]` |

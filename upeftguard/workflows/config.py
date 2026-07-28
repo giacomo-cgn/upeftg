@@ -76,6 +76,7 @@ def stage_context(
         "aggregation": ("features",),
         "training": ("models", "reports"),
         "inference": ("reports",),
+        "explanation": ("reports",),
     }[stage]
     if backend == "slurm":
         stage_directories = (*stage_directories, "logs")

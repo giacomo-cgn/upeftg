@@ -129,6 +129,30 @@ def handle_infer(args: argparse.Namespace, operation) -> int:
     return 0
 
 
+def handle_explain(args: argparse.Namespace, operation) -> int:
+    result = operation(
+        checkpoint=args.checkpoint,
+        feature_file=args.feature_file,
+        background_selection=args.background_selection,
+        explanation_selection=args.explanation_selection,
+        output_root=_resolve_output_root(args.output_root),
+        run_id=args.run_id,
+        partition=args.partition,
+        cpus_per_worker=args.cpus_per_worker,
+        dry_run=args.dry_run,
+        background_label=args.background_label,
+        background_max_samples=args.background_max_samples,
+        explanation_max_samples=args.explanation_max_samples,
+        random_state=args.random_state,
+        batch_size=args.batch_size,
+        grouping=args.grouping,
+        plot_max_display=args.plot_max_display,
+        max_local_plots=args.max_local_plots,
+    )
+    _print_result(result)
+    return 0
+
+
 def handle_full(args: argparse.Namespace, operation) -> int:
     result = operation(
         manifest_json=args.manifest_json,
@@ -289,3 +313,31 @@ def _register_pipeline_group(
     infer.add_argument("--output-root", type=Path, default=Path("runs"))
     infer.add_argument("--run-id", type=str, default=None)
     infer.set_defaults(func=handlers["infer"])
+
+    explain = pipeline_sub.add_parser(
+        "explain",
+        help="Submit grouped linear SHAP explanations for a binary logistic checkpoint",
+    )
+    explain.add_argument("--checkpoint", type=Path, required=True)
+    explain.add_argument("--feature-file", type=Path, required=True)
+    explain.add_argument("--background-selection", type=Path, required=True)
+    explain.add_argument("--explanation-selection", type=Path, required=True)
+    explain.add_argument("--background-label", choices=["all", "clean", "backdoor"], default="all")
+    explain.add_argument("--background-max-samples", type=int, default=None)
+    explain.add_argument("--explanation-max-samples", type=int, default=None)
+    explain.add_argument("--random-state", type=int, default=42)
+    explain.add_argument("--batch-size", type=int, default=128)
+    explain.add_argument(
+        "--grouping",
+        nargs="+",
+        default=["layer+feature"],
+        help=("Coalition strategies using layer, block, head, and feature axes; combine axes with '+' or pass 'all'"),
+    )
+    explain.add_argument("--plot-max-display", type=int, default=20)
+    explain.add_argument("--max-local-plots", type=int, default=20)
+    explain.add_argument("--output-root", type=Path, default=Path("runs"))
+    explain.add_argument("--run-id", type=str, default=None)
+    explain.add_argument("--partition", default="extra")
+    explain.add_argument("--cpus-per-worker", default="4")
+    explain.add_argument("--dry-run", action="store_true")
+    explain.set_defaults(func=handlers["explain"])

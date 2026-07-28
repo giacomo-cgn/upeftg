@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 from pathlib import Path
 
 from ..features.spectral import (
@@ -210,12 +211,61 @@ def handle_supervised(args: argparse.Namespace, operation) -> int:
     return 0
 
 
+def handle_explanation_worker(args: argparse.Namespace) -> int:
+    matplotlib_config_dir = Path(args.output_run_dir) / ".work" / "matplotlib"
+    matplotlib_config_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(matplotlib_config_dir))
+
+    from ..supervised.lifecycle.explanation import run_linear_grouped_explanation
+
+    result = run_linear_grouped_explanation(
+        checkpoint=args.checkpoint,
+        feature_file=args.feature_file,
+        background_selection=args.background_selection,
+        explanation_selection=args.explanation_selection,
+        output_root=_resolve_output_root(args.output_root),
+        run_id=args.run_id,
+        output_run_dir=args.output_run_dir,
+        background_label=args.background_label,
+        background_max_samples=args.background_max_samples,
+        explanation_max_samples=args.explanation_max_samples,
+        random_state=args.random_state,
+        batch_size=args.batch_size,
+        grouping=args.grouping,
+        plot_max_display=args.plot_max_display,
+        max_local_plots=args.max_local_plots,
+    )
+    _print_result(result)
+    return 0
+
+
 def register_internal_commands(sub, handlers: dict[str, object]) -> None:
     run_parser = sub.add_parser("run", help="Internal compatibility runners")
     run_sub = run_parser.add_subparsers(dest="run_command", required=True)
     supervised = run_sub.add_parser("supervised", help="Internal supervised runner")
     _add_supervised_internal_args(supervised)
     supervised.set_defaults(func=handlers["supervised"])
+
+    explanation = run_sub.add_parser(
+        "explanation-worker",
+        help="Internal compute-node worker for grouped linear SHAP",
+    )
+    explanation.add_argument("--checkpoint", type=Path, required=True)
+    explanation.add_argument("--feature-file", type=Path, required=True)
+    explanation.add_argument("--background-selection", type=Path, required=True)
+    explanation.add_argument("--explanation-selection", type=Path, required=True)
+    explanation.add_argument("--output-root", type=Path, default=Path("runs"))
+    explanation.add_argument("--output-run-dir", type=Path, required=True)
+    explanation.add_argument("--run-id", type=str, required=True)
+    explanation.add_argument("--background-label", choices=["all", "clean", "backdoor"], default="all")
+    explanation.add_argument("--background-max-samples", type=int, default=None)
+    explanation.add_argument("--explanation-max-samples", type=int, default=None)
+    explanation.add_argument("--random-state", type=int, default=42)
+    explanation.add_argument("--batch-size", type=int, default=128)
+    explanation.add_argument("--grouping", nargs="+", default=["layer+feature"])
+    explanation.add_argument("--plot-max-display", type=int, default=20)
+    explanation.add_argument("--max-local-plots", type=int, default=20)
+    explanation.set_defaults(func=handle_explanation_worker)
 
     extraction_controller = run_sub.add_parser(
         "slurm-extraction-controller",

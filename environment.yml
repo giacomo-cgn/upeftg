@@ -5,6 +5,7 @@ dependencies:
   - python=3.12
   - numpy
   - scipy
+  - shap>=0.46
   - scikit-learn
   - matplotlib
   - safetensors
