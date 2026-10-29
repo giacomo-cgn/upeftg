@@ -23,3 +23,5 @@ delta_features/
 .codex
 .mplconfig
 .vscode/
+
+feature_bundles/
